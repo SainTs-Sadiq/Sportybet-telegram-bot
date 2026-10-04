@@ -1,0 +1,1 @@
+console.log("SportyBet Telegram Bot: deploy this project to Vercel. Telegram webhook: /telegram/webhook");
