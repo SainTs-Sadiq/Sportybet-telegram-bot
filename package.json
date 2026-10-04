@@ -1,0 +1,10 @@
+{
+  "name": "sportybet-telegram-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram bot that fetches SportyBet Nigeria football fixtures and markets and generates PDF/XLSX reports.",
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "pdfkit": "^0.17.2", "xlsx": "^0.18.5" }
+}
