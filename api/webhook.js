@@ -1,77 +1,195 @@
-import { getFixtures, filterByDay, filterFixtures as sf } from "../lib/sportybet.js";
+import { getFixtures, filterByDay } from "../lib/sportybet.js";
 import { makePdf, makeXlsx } from "../lib/reports.js";
 import { getDailyFixtures, buildCandidates, getPredictions, impliedProbability } from "../lib/football.js";
 import { marketCandidates, rankWithAI, combinedOdds } from "../lib/ai.js";
+import { SPORTS, SPORT_ORDER, sportLabel, getSport } from "../lib/sports.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SECRET = process.env.BOT_SECRET;
 const TZ = process.env.REPORT_TIMEZONE || "Africa/Lagos";
-let cache = { key: "", at: 0, fixtures: [] };
 
-async function tg(method, body) { return fetch(`https://api.telegram.org/bot${TOKEN}/${method}`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) }); }
-async function sendText(chatId,text,replyMarkup){const body={chat_id:chatId,text};if(replyMarkup)body.reply_markup=replyMarkup;return tg("sendMessage",body);}
-async function answerCallback(id){return tg("answerCallbackQuery",{callback_query_id:id});}
-async function sendDocument(chatId,buffer,filename,caption){const form=new FormData();form.append("chat_id",String(chatId));form.append("caption",caption);form.append("document",new Blob([buffer]),filename);return fetch(`https://api.telegram.org/bot${TOKEN}/sendDocument`,{method:"POST",body:form});}
+const cache = new Map();
+const cacheKey = (sport, day) => `${sport}:${day}`;
 
-const keyboard={inline_keyboard:[
-  [{text:"⚽ Today",callback_data:"today"},{text:"🔮 Tomorrow",callback_data:"tomorrow"}],
-  [{text:"🤖 AI 10 Picks",callback_data:"ai_tomorrow_10"},{text:"🤖 AI 20 Picks",callback_data:"ai_tomorrow_20"}],
+async function tg(method, body) {
+  return fetch(`https://api.telegram.org/bot${TOKEN}/${method}`, {
+    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)
+  });
+}
+async function sendText(chatId,text,replyMarkup){
+  const body={chat_id:chatId,text}; if(replyMarkup) body.reply_markup=replyMarkup; return tg("sendMessage",body);
+}
+async function answerCallback(id){ return tg("answerCallbackQuery",{callback_query_id:id}); }
+async function sendDocument(chatId,buffer,filename,caption){
+  const form=new FormData(); form.append("chat_id",String(chatId)); form.append("caption",caption);
+  form.append("document",new Blob([buffer]),filename);
+  return fetch(`https://api.telegram.org/bot${TOKEN}/sendDocument`,{method:"POST",body:form});
+}
+
+const MAIN_MENU={inline_keyboard:[
+  [{text:"⚽ Football",callback_data:"sport_football_today"},{text:"🏀 Basketball",callback_data:"sport_basketball_today"},{text:"🎾 Tennis",callback_data:"sport_tennis_today"}],
+  [{text:"📋 All Sports Today",callback_data:"all_today"},{text:"📅 All Sports Tomorrow",callback_data:"all_tomorrow"}],
   [{text:"📄 PDF",callback_data:"pdf_today"},{text:"📊 Excel",callback_data:"excel_today"}],
   [{text:"📄 Tomorrow PDF",callback_data:"pdf_tomorrow"},{text:"📊 Tomorrow Excel",callback_data:"excel_tomorrow"}],
-  [{text:"🏆 Leagues",callback_data:"leagues"},{text:"📈 Markets",callback_data:"markets"}]
+  [{text:"🤖 AI 10 Picks",callback_data:"ai_tomorrow_10"},{text:"🤖 AI 20 Picks",callback_data:"ai_tomorrow_20"}],
+  [{text:"🏆 Leagues",callback_data:"leagues"},{text:"📈 Markets",callback_data:"markets"}],
+  [{text:"🔎 Search",callback_data:"search_help"},{text:"ℹ️ Help",callback_data:"help"}]
 ]};
 
-async function loadDay(offset){const key=String(offset);if(cache.key===key&&Date.now()-cache.at<45000)return cache.fixtures;const raw=await getFixtures({hours:offset?72:48,pageSize:100,maxPages:10});const fixtures=filterByDay(raw,offset,TZ);cache={key,at:Date.now(),fixtures};return fixtures;}
-function filterFixtures(fixtures,{search="",league="",market=""}={}){const s=search.toLowerCase().trim(),l=league.toLowerCase().trim(),m=market.toLowerCase().trim();return fixtures.filter(f=>{const teamText=`${f.homeTeam} ${f.awayTeam}`.toLowerCase(),leagueText=`${f.league} ${f.category}`.toLowerCase(),marketText=f.markets.map(x=>x.name).join(" ").toLowerCase();return(!s||teamText.includes(s))&&(!l||leagueText.includes(l))&&(!m||marketText.includes(m));});}
-function summary(fixtures,label){const groups=fixtures.reduce((n,f)=>n+f.markets.length,0),outcomes=fixtures.reduce((n,f)=>n+f.markets.reduce((a,m)=>a+m.outcomes.length,0),0);return `⚽ ${label}\n\nGames: ${fixtures.length}\nMarket groups: ${groups}\nSelections/outcomes: ${outcomes}\n\nUse the buttons below or /help for commands.`;}
+const SPORT_MENU=(day)=>({inline_keyboard:[
+  SPORT_ORDER.map(k=>({text:SPORTS[k].label,callback_data:`sport_${k}_${day}`})),
+  [{text:"🌎 All Sports",callback_data:`all_${day}`}],
+  [{text:"⬅️ Main menu",callback_data:"menu"}]
+]});
 
-function dateForOffset(offset){const now=new Date();const parts=new Intl.DateTimeFormat("en-CA",{timeZone:TZ,year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(now);const y=parts.find(x=>x.type==="year").value,m=parts.find(x=>x.type==="month").value,d=parts.find(x=>x.type==="day").value;const dt=new Date(`${y}-${m}-${d}T12:00:00Z`);dt.setUTCDate(dt.getUTCDate()+offset);return dt.toISOString().slice(0,10);}
+function dateForOffset(offset){
+  const now=new Date();
+  const parts=new Intl.DateTimeFormat("en-CA",{timeZone:TZ,year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(now);
+  const y=parts.find(x=>x.type==="year").value,m=parts.find(x=>x.type==="month").value,d=parts.find(x=>x.type==="day").value;
+  const dt=new Date(`${y}-${m}-${d}T12:00:00Z`); dt.setUTCDate(dt.getUTCDate()+offset); return dt.toISOString().slice(0,10);
+}
 
-async function analyzeDay(chatId, offset=1, requested=10){
+async function loadSportDay(sport,offset){
+  const key=cacheKey(sport,offset);
+  const hit=cache.get(key);
+  if(hit && Date.now()-hit.at<45000) return hit.fixtures;
+  const cfg=getSport(sport); if(!cfg) throw new Error(`Unsupported sport: ${sport}`);
+  const raw=await getFixtures({hours:offset?72:48,pageSize:100,maxPages:10,sportId:cfg.sportId,marketIds:sport==="football"?undefined:[]});
+  const fixtures=filterByDay(raw,offset,TZ).map(f=>({...f,sport:sportLabel(sport)}));
+  cache.set(key,{at:Date.now(),fixtures}); return fixtures;
+}
+
+async function loadDay(sport,offset){
+  if(sport!=="all") return loadSportDay(sport,offset);
+  const all=[];
+  for(const key of SPORT_ORDER) all.push(...await loadSportDay(key,offset));
+  return all.sort((a,b)=>a.startMs-b.startMs);
+}
+
+function reportSummary(fixtures,label){
+  const markets=fixtures.reduce((n,f)=>n+(f.markets||[]).length,0);
+  const outcomes=fixtures.reduce((n,f)=>n+(f.markets||[]).reduce((a,m)=>a+(m.outcomes||[]).length,0),0);
+  const bySport={};
+  for(const f of fixtures) bySport[f.sport]=(bySport[f.sport]||0)+1;
+  const sportLines=Object.entries(bySport).map(([s,n])=>`${s}: ${n}`).join("\n");
+  return `📋 ${label}\n\n${sportLines||"No fixtures found."}\n\nTotal games: ${fixtures.length}\nMarket groups: ${markets}\nSelections/outcomes: ${outcomes}`;
+}
+
+function menuTitle(sport,offset){
+  return sport==="all" ? `🌎 ALL SPORTS — ${offset?"TOMORROW":"TODAY"}` : `${sportLabel(sport)} — ${offset?"TOMORROW":"TODAY"}`;
+}
+
+async function runReport(chatId,action,sport="all"){
+  const offset=action.includes("tomorrow")?1:0;
+  const isPdf=action.startsWith("pdf"), isExcel=action.startsWith("excel");
+  await sendText(chatId,`⏳ Fetching ${menuTitle(sport,offset)}...`);
+  const fixtures=await loadDay(sport,offset);
+  if(!isPdf&&!isExcel){
+    return sendText(chatId,`${reportSummary(fixtures,menuTitle(sport,offset))}\n\nChoose another option:`,SPORT_MENU(offset?"tomorrow":"today"));
+  }
+  await sendText(chatId,`⏳ Building ${isPdf?"PDF":"Excel"} for ${fixtures.length} games...`);
+  if(isPdf){
+    const b=await makePdf(fixtures,TZ,`SportyBet ${sport==="all"?"All Sports":sportLabel(sport)} Markets — ${offset?"Tomorrow":"Today"}`);
+    return sendDocument(chatId,b,`sportybet-${sport}-${offset?"tomorrow":"today"}.pdf`,`📄 ${menuTitle(sport,offset)} • ${fixtures.length} games`);
+  }
+  const b=makeXlsx(fixtures,TZ);
+  return sendDocument(chatId,b,`sportybet-${sport}-${offset?"tomorrow":"today"}.xlsx`,`📊 ${menuTitle(sport,offset)} • ${fixtures.length} games`);
+}
+
+async function analyzeDay(chatId,offset=1,requested=10){
   if(!process.env.API_FOOTBALL_KEY) throw new Error("AI analysis needs API_FOOTBALL_KEY in Vercel.");
   if(!process.env.OPENAI_API_KEY) throw new Error("AI analysis needs OPENAI_API_KEY in Vercel.");
-  const fixtures=await loadDay(offset);
-  if(!fixtures.length){await sendText(chatId,"No SportyBet fixtures found for the selected day.");return;}
-  await sendText(chatId,`🤖 Analyzing ${fixtures.length} games...\n\nChecking SportyBet markets against football performance/prediction data. This can take a little longer than a normal report.`);
-  const date=dateForOffset(offset);
-  const external=await getDailyFixtures(date);
-  const matched=buildCandidates(fixtures,external,25);
-  if(!matched.length){await sendText(chatId,"⚠️ I couldn't match the SportyBet fixtures to the statistical provider for this date. No picks were generated.");return;}
+  const fixtures=await loadSportDay("football",offset);
+  if(!fixtures.length){await sendText(chatId,"No football fixtures found for the selected day.");return;}
+  await sendText(chatId,`🤖 Analyzing ${fixtures.length} football games...\n\nThe multi-sport fixture/report system is separate from the football AI model for now.`);
+  const date=dateForOffset(offset), external=await getDailyFixtures(date), matched=buildCandidates(fixtures,external,25);
+  if(!matched.length){await sendText(chatId,"⚠️ I couldn't match the SportyBet fixtures to the statistical provider. No picks were generated.");return;}
   const predicted=(await Promise.all(matched.map(async c=>{try{return {...c,prediction:await getPredictions(c.api.fixture?.id)}}catch{return {...c,prediction:null}}}))).filter(x=>x.prediction);
   const candidates=predicted.flatMap(c=>marketCandidates(c.sporty,c.prediction).map(x=>({...x,sourceMatchScore:c.matchScore,apiFixtureId:c.api.fixture.id})));
-  const usable=candidates.filter(x=>x.odds>1 && x.modelProbability>=50).sort((a,b)=>(b.edge??-99)-(a.edge??-99));
-  if(!usable.length){await sendText(chatId,"⚠️ No statistically supported SportyBet selections met the minimum threshold. I won't manufacture picks just to fill the list.");return;}
+  const usable=candidates.filter(x=>x.odds>1&&x.modelProbability>=50).sort((a,b)=>(b.edge??-99)-(a.edge??-99));
+  if(!usable.length){await sendText(chatId,"⚠️ No statistically supported selections met the minimum threshold.");return;}
   const picks=await rankWithAI(usable.slice(0,60),Math.min(20,Math.max(1,requested)));
   if(!picks.length){await sendText(chatId,"⚠️ The AI ranking returned no selections.");return;}
   const lines=picks.map((p,i)=>`${i+1}. ${p.match}\n   🎯 ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}\n   📊 Model: ${p.modelProbability.toFixed(1)}% | Implied: ${(impliedProbability(p.odds)*100).toFixed(1)}% | Edge: ${((p.edge||0)*100).toFixed(1)}%\n   ${p.confidence} confidence • ${p.risk} risk\n   ${p.rationale}`);
-  const combined=combinedOdds(picks);
-  await sendText(chatId,`🤖 AI STATISTICAL ANALYSIS — ${offset?"TOMORROW":"TODAY"}\n\n${lines.join("\n\n")}\n\n📈 Combined odds of these selections: ${combined.toFixed(2)}\n\n⚠️ This is a statistical ranking, not a guarantee. Picks are only generated where the available data supports them.\n\nData sources: SportyBet markets/odds + API-Football prediction data + AI ranking.`);
+  await sendText(chatId,`🤖 AI FOOTBALL ANALYSIS — ${offset?"TOMORROW":"TODAY"}\n\n${lines.join("\n\n")}\n\n📈 Combined odds: ${combinedOdds(picks).toFixed(2)}\n\n⚠️ Statistical ranking, not a guarantee.`);
 }
 
 async function handleAction(chatId,action){
-  if(action.startsWith("ai_tomorrow_")){const n=Number(action.split("_").pop())||10;return analyzeDay(chatId,1,n);}
-  if(action==="leagues"){const fixtures=[...await loadDay(0),...await loadDay(1)],counts=new Map();for(const f of fixtures)counts.set(f.league,(counts.get(f.league)||0)+1);const lines=[...counts.entries()].sort((a,b)=>b[1]-a[1]).slice(0,40).map(([name,n],i)=>`${i+1}. ${name} — ${n} games`);return sendText(chatId,`🏆 Leagues found\n\n${lines.join("\n")||"No leagues found."}`);}
-  if(action==="markets"){const fixtures=await loadDay(0),counts=new Map();for(const f of fixtures)for(const m of f.markets)counts.set(m.name,(counts.get(m.name)||0)+1);const lines=[...counts.entries()].sort((a,b)=>b[1]-a[1]).slice(0,50).map(([name,n],i)=>`${i+1}. ${name} — ${n} games`);return sendText(chatId,`📈 Today's markets\n\n${lines.join("\n")||"No markets found."}`);}
-  const offset=action.includes("tomorrow")?1:0,fixtures=await loadDay(offset);
-  if(action==="today"||action==="tomorrow")return sendText(chatId,summary(fixtures,offset?"Tomorrow":"Today"),keyboard);
-  const isPdf=action.startsWith("pdf_"),isExcel=action.startsWith("excel_");
-  if(isPdf||isExcel){await sendText(chatId,`⏳ Building ${offset?"tomorrow's":"today's"} ${isPdf?"PDF":"Excel report"} for ${fixtures.length} games...`);if(isPdf){const b=await makePdf(fixtures,TZ,`SportyBet Football Markets — ${offset?"Tomorrow":"Today"}`);await sendDocument(chatId,b,`sportybet-${offset?"tomorrow":"today"}.pdf`,`📄 SportyBet report • ${fixtures.length} games`);}else{const b=makeXlsx(fixtures,TZ);await sendDocument(chatId,b,`sportybet-${offset?"tomorrow":"today"}.xlsx`,`📊 SportyBet spreadsheet • ${fixtures.length} games`);}}
+  if(action==="menu") return sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);
+  if(action==="help"||action==="search_help"){
+    return sendText(chatId,action==="search_help"
+      ?"🔎 Search\n\nUse /search Arsenal or /search NBA. Search is currently against tomorrow's all-sport fixture list."
+      :"⚽🏀🎾 SportyBet Markets Bot\n\n/fixtures — choose Football, Basketball, Tennis or All Sports\n/today — all sports today\n/tomorrow — all sports tomorrow\n/pdf — all sports today\n/pdf_tomorrow — all sports tomorrow\n/excel — all sports today\n/excel_tomorrow — all sports tomorrow\n/football, /basketball, /tennis — sport menus\n/search TEAM — search tomorrow's all-sport fixtures\n\n🤖 /analyze tomorrow 10 — football AI analysis for now. Basketball/tennis AI will be added after their statistical data layer is connected.",MAIN_MENU);
+  }
+  if(action==="leagues"||action==="markets"){
+    const fixtures=await loadDay("all",1), counts=new Map();
+    for(const f of fixtures){if(action==="leagues"){const n=f.league||"Unknown";counts.set(n,(counts.get(n)||0)+1)}else for(const m of f.markets||[]){const n=m.name||"Other";counts.set(n,(counts.get(n)||0)+1)}}
+    const body=[...counts.entries()].sort((a,b)=>b[1]-a[1]).slice(0,50).map(([n,c],i)=>`${i+1}. ${n} — ${c}`).join("\n")||"No data found.";
+    return sendText(chatId,`${action==="leagues"?"🏆":"📈"} Tomorrow's ${action}\n\n${body}`,MAIN_MENU);
+  }
+  if(action.startsWith("ai_tomorrow_")) return analyzeDay(chatId,1,Number(action.split("_").pop())||10);
+  if(action.startsWith("sport_")){
+    const [,sport,day]=action.split("_"); return runReport(chatId,day==="tomorrow"?"summary_tomorrow":"summary_today",sport);
+  }
+  if(action.startsWith("all_")){
+    const day=action.endsWith("tomorrow")?"tomorrow":"today"; return runReport(chatId,`summary_${day}`,"all");
+  }
+  if(action.startsWith("pdf_")||action.startsWith("excel_")){
+    return runReport(chatId,action,"all");
+  }
+  return sendText(chatId,"Unknown menu action. Tap /start.",MAIN_MENU);
+}
+
+async function setBotCommands(){
+  const commands=[
+    {command:"start",description:"Open the multi-sport menu"},
+    {command:"fixtures",description:"Choose sport and date"},
+    {command:"today",description:"All sports today"},
+    {command:"tomorrow",description:"All sports tomorrow"},
+    {command:"football",description:"Football fixtures menu"},
+    {command:"basketball",description:"Basketball fixtures menu"},
+    {command:"tennis",description:"Tennis fixtures menu"},
+    {command:"pdf",description:"All sports today's PDF"},
+    {command:"pdf_tomorrow",description:"All sports tomorrow's PDF"},
+    {command:"excel",description:"All sports today's spreadsheet"},
+    {command:"excel_tomorrow",description:"All sports tomorrow's spreadsheet"},
+    {command:"leagues",description:"List tomorrow's leagues"},
+    {command:"markets",description:"List tomorrow's markets"},
+    {command:"search",description:"Search fixtures"},
+    {command:"analyze",description:"AI football analysis"},
+    {command:"help",description:"Help"}
+  ];
+  try{await tg("setMyCommands",{commands})}catch(e){console.error(e)}
+}
+
+async function handleWebhook(req,res){
+  if(req.method!=="POST") return res.status(200).json({ok:true});
+  if(SECRET&&req.headers["x-telegram-bot-api-secret-token"]!==SECRET) return res.status(401).end();
+  const update=req.body||{}, msg=update.message, callback=update.callback_query, chatId=msg?.chat?.id||callback?.message?.chat?.id;
+  if(!chatId) return res.status(200).json({ok:true});
+  try{
+    if(callback){await answerCallback(callback.id);await handleAction(chatId,callback.data);return res.status(200).json({ok:true});}
+    const raw=(msg.text||"").trim(), text=raw.toLowerCase(), command=text.split(/\s+/)[0];
+    if(command==="/start"||command==="/help"){await setBotCommands();await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
+    if(command==="/fixtures"||command==="/football"||command==="/basketball"||command==="/tennis"){
+      const sport=command==="/fixtures"?"all":command.slice(1);
+      await sendText(chatId,sport==="all"?"📋 Choose sport and date:":`${sportLabel(sport)}\n\nChoose date:`,SPORT_MENU("today"));return res.status(200).json({ok:true});
+    }
+    if(command==="/today"||command==="/tomorrow"){await runReport(chatId,command,"all");return res.status(200).json({ok:true});}
+    if(command==="/pdf"||command==="/pdf_tomorrow"||command==="/excel"||command==="/excel_tomorrow"){await runReport(chatId,command,"all");return res.status(200).json({ok:true});}
+    if(command==="/leagues"||command==="/markets"){await handleAction(chatId,command.slice(1));return res.status(200).json({ok:true});}
+    if(command==="/analyze"){const p=text.split(/\s+/),when=p[1]==="today"?0:1,n=Math.min(20,Math.max(1,Number(p[2])||10));await analyzeDay(chatId,when,n);return res.status(200).json({ok:true});}
+    if(command==="/search"){
+      const q=raw.slice(command.length).trim().toLowerCase(); if(!q){await sendText(chatId,"Usage: /search Arsenal",MAIN_MENU);return res.status(200).json({ok:true});}
+      const fixtures=await loadDay("all",1), matches=fixtures.filter(f=>`${f.homeTeam} ${f.awayTeam} ${f.league}`.toLowerCase().includes(q));
+      const body=matches.slice(0,40).map(f=>`${f.sport} — ${f.homeTeam} vs ${f.awayTeam}\n   ${f.league}`).join("\n")||"No matching fixtures found.";
+      await sendText(chatId,`🔎 Search: ${q}\n\n${body}\n\nFound ${matches.length} fixture(s).`,MAIN_MENU);return res.status(200).json({ok:true});
+    }
+    await sendText(chatId,"Unknown command. Send /start.",MAIN_MENU);return res.status(200).json({ok:true});
+  }catch(e){console.error(e);try{await sendText(chatId,`❌ Error: ${e.message||"Unable to retrieve data."}`,MAIN_MENU)}catch{}return res.status(200).json({ok:false});}
 }
 
 export default async function handler(req,res){
-  if(req.method!=="POST")return res.status(200).json({ok:true,service:"sportybet-telegram-bot"});
-  if(SECRET&&req.headers["x-telegram-bot-api-secret-token"]!==SECRET)return res.status(401).end();
-  const update=req.body||{},msg=update.message,callback=update.callback_query,chatId=msg?.chat?.id||callback?.message?.chat?.id;if(!chatId)return res.status(200).json({ok:true});
-  try{
-    if(callback){await answerCallback(callback.id);await handleAction(chatId,callback.data);return res.status(200).json({ok:true});}
-    const rawText=(msg.text||"").trim(),text=rawText.toLowerCase();
-    if(text==="/start"||text==="/help"){await sendText(chatId,`⚽ SportyBet Markets Bot v3\n\nTODAY / TOMORROW\n/today — today's games\n/tomorrow — tomorrow's games\n\nREPORTS\n/pdf — today's full PDF\n/pdf_tomorrow — tomorrow's PDF\n/excel — today's Excel\n/excel_tomorrow — tomorrow's Excel\n\nFILTERS\n/search Arsenal — find team fixtures\n/leagues — league list\n/markets — today's market list\n/market corners — games offering that market\n\n🤖 AI ANALYSIS\n/analyze tomorrow 10 — rank up to 10 statistical picks\n/analyze tomorrow 20 — rank up to 20 statistical picks\n\nAI combines SportyBet odds with external football prediction/performance data and then uses an AI ranking layer. It does not guarantee outcomes or place wagers.`,keyboard);return res.status(200).json({ok:true});}
-    const command=text.split(/\s+/)[0];
-    if(command==="/analyze"){const parts=text.split(/\s+/),when=parts[1]==="today"?0:1,n=Math.min(20,Math.max(1,Number(parts[2])||10));await analyzeDay(chatId,when,n);return res.status(200).json({ok:true});}
-    if(command==="/today"||command==="/tomorrow"){await handleAction(chatId,command.slice(1));return res.status(200).json({ok:true});}
-    if(command==="/pdf"||command==="/excel"||command==="/pdf_tomorrow"||command==="/excel_tomorrow"){const action=command.startsWith("/pdf")?`pdf_${command.includes("tomorrow")?"tomorrow":"today"}`:`excel_${command.includes("tomorrow")?"tomorrow":"today"}`;await handleAction(chatId,action);return res.status(200).json({ok:true});}
-    if(command==="/leagues"||command==="/markets"){await handleAction(chatId,command.slice(1));return res.status(200).json({ok:true});}
-    if(command==="/search"||command==="/market"){const query=rawText.slice(command.length).trim();if(!query){await sendText(chatId,command==="/search"?"Usage: /search Arsenal":"Usage: /market corners");return res.status(200).json({ok:true});}const fixtures=await loadDay(0),filtered=command==="/search"?filterFixtures(fixtures,{search:query}):filterFixtures(fixtures,{market:query});const lines=filtered.slice(0,35).map((f,i)=>`${i+1}. ${new Intl.DateTimeFormat("en-GB",{timeZone:TZ,hour:"2-digit",minute:"2-digit"}).format(new Date(f.startMs))} — ${f.homeTeam} vs ${f.awayTeam}\n   ${f.league}`);await sendText(chatId,`🔎 ${command==="/search"?"Search":"Market"}: ${query}\n\n${lines.join("\n")||"No matching fixtures found."}\n\nFound ${filtered.length} game(s).`);return res.status(200).json({ok:true});}
-    await sendText(chatId,"Unknown command. Send /help to see everything available.",keyboard);return res.status(200).json({ok:true});
-  }catch(e){console.error(e);await sendText(chatId,`❌ Error: ${e.message||"Unable to retrieve data."}`);return res.status(200).json({ok:false});}
+  if(req.method!=="POST") return res.status(200).json({ok:true,service:"sportybet-telegram-bot"});
+  return handleWebhook(req,res);
 }
