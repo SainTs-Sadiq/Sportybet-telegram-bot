@@ -189,7 +189,9 @@ async function handleWebhook(req,res){
   }catch(e){console.error(e);try{await sendText(chatId,`❌ Error: ${e.message||"Unable to retrieve data."}`,MAIN_MENU)}catch{}return res.status(200).json({ok:false});}
 }
 
-export default async function handler(req,res){
+export async function handler(req,res){
   if(req.method!=="POST") return res.status(200).json({ok:true,service:"sportybet-telegram-bot"});
   return handleWebhook(req,res);
 }
+
+export default handler;
