@@ -85,7 +85,7 @@ async function runReport(chatId,action,sport="all"){
   await sendText(chatId,`⏳ Fetching ${menuTitle(sport,offset)}...`);
   const fixtures=await loadDay(sport,offset);
   if(!isPdf&&!isExcel){
-    return sendText(chatId,`${reportSummary(fixtures,menuTitle(sport,offset))}\n\nChoose another option:`,SPORT_MENU(offset?"tomorrow":"today"));
+    return sendText(chatId,`${reportSummary(fixtures,menuTitle(sport,offset))}\n\nChoose another option:`,SPORT_MENU());
   }
   await sendText(chatId,`⏳ Building ${isPdf?"PDF":"Excel"} for ${fixtures.length} games...`);
   if(isPdf){
