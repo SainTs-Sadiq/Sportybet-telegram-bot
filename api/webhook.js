@@ -29,8 +29,8 @@ async function sendDocument(chatId,buffer,filename,caption){
 const MAIN_MENU={inline_keyboard:[
   [{text:"⚽ Football",callback_data:"sport_football_today"},{text:"🏀 Basketball",callback_data:"sport_basketball_today"},{text:"🎾 Tennis",callback_data:"sport_tennis_today"}],
   [{text:"📋 All Sports Today",callback_data:"all_today"},{text:"📅 All Sports Tomorrow",callback_data:"all_tomorrow"}],
-  [{text:"📄 PDF",callback_data:"pdf_today"},{text:"📊 Excel",callback_data:"excel_today"}],
-  [{text:"📄 Tomorrow PDF",callback_data:"pdf_tomorrow"},{text:"📊 Tomorrow Excel",callback_data:"excel_tomorrow"}],
+  [{text:"🌎 All Sports PDF — Today",callback_data:"pdf_today"},{text:"🌎 All Sports PDF — Tomorrow",callback_data:"pdf_tomorrow"}],
+  [{text:"📊 All Sports Excel — Today",callback_data:"excel_today"},{text:"📊 All Sports Excel — Tomorrow",callback_data:"excel_tomorrow"}],
   [{text:"🤖 AI 10 Picks",callback_data:"ai_tomorrow_10"},{text:"🤖 AI 20 Picks",callback_data:"ai_tomorrow_20"}],
   [{text:"🏆 Leagues",callback_data:"leagues"},{text:"📈 Markets",callback_data:"markets"}],
   [{text:"🔎 Search",callback_data:"search_help"},{text:"ℹ️ Help",callback_data:"help"}]
@@ -161,8 +161,10 @@ async function setBotCommands(){
     {command:"football",description:"Football fixtures menu"},
     {command:"basketball",description:"Basketball fixtures menu"},
     {command:"tennis",description:"Tennis fixtures menu"},
-    {command:"pdf",description:"All sports today's PDF"},
-    {command:"pdf_tomorrow",description:"All sports tomorrow's PDF"},
+    {command:"pdf",description:"All sports PDF today"},
+    {command:"pdf_tomorrow",description:"All sports PDF tomorrow"},
+    {command:"all_pdf_today",description:"Download all sports PDF for today"},
+    {command:"all_pdf_tomorrow",description:"Download all sports PDF for tomorrow"},
     {command:"excel",description:"All sports today's spreadsheet"},
     {command:"excel_tomorrow",description:"All sports tomorrow's spreadsheet"},
     {command:"leagues",description:"List tomorrow's leagues"},
@@ -188,7 +190,7 @@ async function handleWebhook(req,res){
       await sendText(chatId,sport==="all"?"📋 Choose sport and date:":`${sportLabel(sport)}\n\nChoose date:`,SPORT_MENU());return res.status(200).json({ok:true});
     }
     if(command==="/today"||command==="/tomorrow"){await runReport(chatId,command,"all");return res.status(200).json({ok:true});}
-    if(command==="/pdf"||command==="/pdf_tomorrow"||command==="/excel"||command==="/excel_tomorrow"){await runReport(chatId,command,"all");return res.status(200).json({ok:true});}
+    if(command==="/pdf"||command==="/pdf_tomorrow"||command==="/all_pdf_today"||command==="/all_pdf_tomorrow"||command==="/excel"||command==="/excel_tomorrow"){const action=command==="/all_pdf_today"?"pdf_today":command==="/all_pdf_tomorrow"?"pdf_tomorrow":command.slice(1);await runReport(chatId,action,"all");return res.status(200).json({ok:true});}
     if(command==="/leagues"||command==="/markets"){await handleAction(chatId,command.slice(1));return res.status(200).json({ok:true});}
     if(command==="/analyze"){const p=text.split(/\s+/),when=p[1]==="today"?0:1,n=Math.min(20,Math.max(1,Number(p[2])||10));await analyzeDay(chatId,when,n);return res.status(200).json({ok:true});}
     if(command==="/search"){
