@@ -36,9 +36,12 @@ const MAIN_MENU={inline_keyboard:[
   [{text:"🔎 Search",callback_data:"search_help"},{text:"ℹ️ Help",callback_data:"help"}]
 ]};
 
-const SPORT_MENU=(day)=>({inline_keyboard:[
-  SPORT_ORDER.map(k=>({text:SPORTS[k].label,callback_data:`sport_${k}_${day}`})),
-  [{text:"🌎 All Sports",callback_data:`all_${day}`}],
+const SPORT_MENU=()=>({inline_keyboard:[
+  ...SPORT_ORDER.map(k=>[
+    {text:`${SPORTS[k].label} — Today`,callback_data:`sport_${k}_today`},
+    {text:`${SPORTS[k].label} — Tomorrow`,callback_data:`sport_${k}_tomorrow`}
+  ]),
+  [{text:"🌎 All Sports — Today",callback_data:"all_today"},{text:"🌎 All Sports — Tomorrow",callback_data:"all_tomorrow"}],
   [{text:"⬅️ Main menu",callback_data:"menu"}]
 ]});
 
@@ -55,7 +58,10 @@ async function loadSportDay(sport,offset){
   if(hit && Date.now()-hit.at<45000) return hit.fixtures;
   const cfg=getSport(sport); if(!cfg) throw new Error(`Unsupported sport: ${sport}`);
   const raw=await getFixtures({hours:offset?72:48,pageSize:100,maxPages:10,sportId:cfg.sportId,marketIds:sport==="football"?undefined:[]});
-  const fixtures=filterByDay(raw,offset,TZ).map(f=>({...f,sport:sportLabel(sport)}));
+  const expectedSportId=cfg.sportId;
+  // If SportyBet supplies sport metadata, reject events that contradict the requested sport.
+  const verified=raw.filter(f=>!f.sourceSportId || String(f.sourceSportId)===expectedSportId);
+  const fixtures=filterByDay(verified,offset,TZ).map(f=>({...f,sport:sportLabel(sport)}));
   cache.set(key,{at:Date.now(),fixtures}); return fixtures;
 }
 
@@ -63,7 +69,13 @@ async function loadDay(sport,offset){
   if(sport!=="all") return loadSportDay(sport,offset);
   const all=[];
   for(const key of SPORT_ORDER) all.push(...await loadSportDay(key,offset));
-  return all.sort((a,b)=>a.startMs-b.startMs);
+  // Some provider endpoints can overlap; don't count the same event more than once.
+  const unique=new Map();
+  for(const fixture of all) {
+    const key=fixture.eventId || `${fixture.sportId}:${fixture.startMs}:${fixture.homeTeam}:${fixture.awayTeam}`;
+    if(!unique.has(key)) unique.set(key,fixture);
+  }
+  return [...unique.values()].sort((a,b)=>a.startMs-b.startMs);
 }
 
 function reportSummary(fixtures,label){
@@ -173,7 +185,7 @@ async function handleWebhook(req,res){
     if(command==="/start"||command==="/help"){await setBotCommands();await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
     if(command==="/fixtures"||command==="/football"||command==="/basketball"||command==="/tennis"){
       const sport=command==="/fixtures"?"all":command.slice(1);
-      await sendText(chatId,sport==="all"?"📋 Choose sport and date:":`${sportLabel(sport)}\n\nChoose date:`,SPORT_MENU("today"));return res.status(200).json({ok:true});
+      await sendText(chatId,sport==="all"?"📋 Choose sport and date:":`${sportLabel(sport)}\n\nChoose date:`,SPORT_MENU());return res.status(200).json({ok:true});
     }
     if(command==="/today"||command==="/tomorrow"){await runReport(chatId,command,"all");return res.status(200).json({ok:true});}
     if(command==="/pdf"||command==="/pdf_tomorrow"||command==="/excel"||command==="/excel_tomorrow"){await runReport(chatId,command,"all");return res.status(200).json({ok:true});}
