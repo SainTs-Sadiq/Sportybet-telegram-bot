@@ -62,6 +62,7 @@ async function loadSportDay(sport,offset){
   // If SportyBet supplies sport metadata, reject events that contradict the requested sport.
   const verified=raw.filter(f=>!f.sourceSportId || String(f.sourceSportId)===expectedSportId);
   const fixtures=filterByDay(verified,offset,TZ).map(f=>({...f,sport:sportLabel(sport)}));
+  console.log("[fixtures-day-debug]", JSON.stringify({ sport, offset, requestedSportId:expectedSportId, rawCount:raw.length, verifiedCount:verified.length, dayCount:fixtures.length, timezone:TZ }));
   cache.set(key,{at:Date.now(),fixtures}); return fixtures;
 }
 
