@@ -200,7 +200,8 @@ async function createBookingForChat(chatId) {
   const url=result.shareURL ? `\nOpen slip: ${result.shareURL}` : "";
   await sendText(chatId,`✅ SPORTYBET BOOKING CODE CREATED${code}${url}\n\nSelections requested: ${s.selections.length}\nExpiry: ${expiry}${unavailable}\n\nThis is a reserved bet slip only. No bet has been placed and no money has been staked.`,MAIN_MENU);
 }
-\nasync function handleAction(chatId,action){
+
+async function handleAction(chatId,action){
   if(action==="menu") return sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);
   if(action==="help"||action==="search_help"){
     return sendText(chatId,action==="search_help"
