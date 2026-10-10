@@ -228,12 +228,23 @@ async function buildTargetBooking(chatId,target,offset=0) {
 
   const matched = buildCandidates(fixtures,apiFixtures,100)
     .filter(x=>x.matchScore>=0.65);
-  const predictions = await Promise.all(matched.map(async c => {
+  // API-Football's free/low-tier rate limit is commonly 10 requests/minute.
+  // Avoid firing dozens of prediction calls simultaneously; use a small bounded
+  // batch so one high-odds request doesn't immediately exhaust the subscription.
+  const predictionBatch = matched.slice(0, 8);
+  const predictions = [];
+  for (const candidate of predictionBatch) {
     try {
-      const prediction = await getPredictions(c.api.fixture?.id);
-      return prediction ? {...c,prediction} : null;
-    } catch(e) { console.error("Prediction lookup failed",e); return null; }
-  }));
+      const prediction = await getPredictions(candidate.api.fixture?.id);
+      if (prediction) predictions.push({...candidate,prediction});
+    } catch(e) {
+      console.error("Prediction lookup failed",e);
+      if (/too many requests|rate limit|429/i.test(String(e?.message||e))) {
+        await sendText(chatId,"⚠️ API-Football rate limit reached. I stopped requesting more predictions to avoid hammering the API; try again after the quota window resets. I'll only build a slip if enough verified picks are available.");
+        break;
+      }
+    }
+  }
   const candidates = predictions.filter(Boolean).flatMap(c =>
     marketCandidates(c.sporty,c.prediction).map(p=>({
       ...p, eventId:c.sporty.eventId, league:c.sporty.league,
@@ -249,8 +260,25 @@ async function buildTargetBooking(chatId,target,offset=0) {
   // One selection per match, with the strongest qualifying model probability.
   const bestByEvent=new Map();
   for(const p of candidates) if(!bestByEvent.has(String(p.eventId))) bestByEvent.set(String(p.eventId),p);
-  const ranked=[...bestByEvent.values()];
+  let ranked=[...bestByEvent.values()];
   if(!ranked.length) return sendText(chatId,"⚠️ No selections met the current filters (API-Football match confidence ≥65%, odds 1.01–2.20, and a valid SportyBet 1X2 market). I won't invent or add weaker picks just to reach a target.",MAIN_MENU);
+
+  // Gemini ranks the already-verified statistical candidates; it cannot add
+  // fixtures or lower the probability/odds filters. Statistical ranking remains
+  // available if the optional AI service fails.
+  if (process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY) {
+    try {
+      const aiRanked = await rankWithAI(ranked.map((p,i)=>({
+        id:i+1, match:p.match, market:p.market, selection:p.selection, odds:p.odds,
+        modelProbability:p.probability, edge:p.edge, league:p.league,
+        matchScore:p.matchScore, startMs:p.startMs
+      })), ranked.length);
+      const order = new Map(aiRanked.map((p,i)=>[String(p.id),i]));
+      if (aiRanked.length) ranked = [...ranked].sort((a,b)=>(order.get(String(ranked.indexOf(a)+1))??999)-(order.get(String(ranked.indexOf(b)+1))??999));
+    } catch (e) {
+      console.error("Gemini target-slip ranking failed; using statistical ranking",e);
+    }
+  }
 
   const picks=[]; let product=1;
   for(const pick of ranked) {
