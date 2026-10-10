@@ -33,7 +33,7 @@ const MAIN_MENU={inline_keyboard:[
   [{text:"🌎 All Sports PDF — Today",callback_data:"pdf_today"},{text:"🌎 All Sports PDF — Tomorrow",callback_data:"pdf_tomorrow"}],
   [{text:"📊 All Sports Excel — Today",callback_data:"excel_today"},{text:"📊 All Sports Excel — Tomorrow",callback_data:"excel_tomorrow"}],
   [{text:"🤖 AI 10 Picks",callback_data:"ai_tomorrow_10"},{text:"🤖 AI 20 Picks",callback_data:"ai_tomorrow_20"}],
-  [{text:"🎟️ Build Booking Code",callback_data:"book_start"}],
+  [{text:"🎟️ Build Booking Code",callback_data:"book_start"}],\n  [{text:"🎯 Target Odds 10/20/50/100/500/1000",callback_data:"book_targets"}],
   [{text:"🏆 Leagues",callback_data:"leagues"},{text:"📈 Markets",callback_data:"markets"}],
   [{text:"🔎 Search",callback_data:"search_help"},{text:"ℹ️ Help",callback_data:"help"}]
 ]};
@@ -201,7 +201,60 @@ async function createBookingForChat(chatId) {
   await sendText(chatId,`✅ SPORTYBET BOOKING CODE CREATED${code}${url}\n\nSelections requested: ${s.selections.length}\nExpiry: ${expiry}${unavailable}\n\nThis is a reserved bet slip only. No bet has been placed and no money has been staked.`,MAIN_MENU);
 }
 
-async function handleAction(chatId,action){
+
+async function buildTargetBooking(chatId,target,offset=0) {
+  const allowed=[10,20,50,100,500,1000];
+  if(!allowed.includes(target)) return sendText(chatId,"Choose a supported target odds value.",MAIN_MENU);
+  await sendText(chatId,`⏳ Finding the lowest available odds for ${offset?"tomorrow":"today"} and building a slip targeting ${target} odds...`);
+  const fixtures=await loadSportDay("football",offset);
+  const candidates=[];
+  for(const f of fixtures) {
+    if(Number(f.startMs)<=Date.now()) continue;
+    const choices=[];
+    for(const m of (f.markets||[])) {
+      // Use only widely understood pre-match markets, and prefer the lowest odds.
+      if(!["1","10"].includes(String(m.id))) continue;
+      for(const o of (m.outcomes||[])) {
+        const odds=Number(o.odds);
+        if(o.active && odds>1 && odds<=2.2) choices.push({eventId:f.eventId,marketId:String(m.id),specifier:String(m.specifier||""),outcomeId:String(o.id),odds,startMs:Number(f.startMs),label:`${f.homeTeam} vs ${f.awayTeam} — ${m.name}: ${o.name} @ ${odds.toFixed(2)}`,league:f.league});
+      }
+    }
+    choices.sort((a,b)=>a.odds-b.odds);
+    if(choices.length) candidates.push(choices[0]);
+  }
+  candidates.sort((a,b)=>a.odds-b.odds || a.startMs-b.startMs);
+  if(!candidates.length) return sendText(chatId,"No suitable upcoming fixtures with active low-odds 1X2/Double Chance outcomes were found for that day.",MAIN_MENU);
+  const picks=[]; let product=1;
+  for(const pick of candidates) {
+    if(product>=target) break;
+    picks.push(pick); product*=pick.odds;
+  }
+  if(product<target) return sendText(chatId,`Only ${product.toFixed(2)} combined odds could be built from ${picks.length} eligible games. There are not enough suitable fixtures to reach ${target} today. Try tomorrow or a lower target.`,MAIN_MENU);
+  const session=getBookingSession(chatId);
+  session.fixtures=fixtures;
+  session.selections=picks.map((p,i)=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:p.label}));
+  await sendText(chatId,`🎯 TARGET ODDS SLIP — ${offset?"TOMORROW":"TODAY"}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}\nMethod: lowest odds first, one selection per fixture, limited to 1X2 and Double Chance markets.\n\n${picks.map((p,i)=>`${i+1}. ${p.label}`).join("\n")}\n\nReview before generating. These odds can change and this is not a prediction of guaranteed wins.`,{inline_keyboard:[[{text:"✅ Review & generate code",callback_data:"book_view"}],[{text:"🗑 Clear slip",callback_data:"book_clear"},{text:"⬅️ Main menu",callback_data:"menu"}]]});
+}
+\nasync function handleAction(chatId,action){
+  if(action.startsWith("book_")){
+    if(action==="book_start") return startBooking(chatId);
+    if(action==="book_view") return viewBooking(chatId);
+    if(action==="book_clear"){bookingSessions.set(String(chatId),{fixtures:[],selections:[],pendingEvent:null});return sendText(chatId,"Your booking slip has been cleared.",MAIN_MENU);}
+    if(action==="book_create") return createBookingForChat(chatId);
+    if(action.startsWith("book_event_")) return chooseBookingEvent(chatId,Number(action.slice("book_event_".length)));
+    if(action.startsWith("book_market_")){
+      const match=action.match(/^book_market_(\\d+)_(.+)$/);
+      if(!match) return sendText(chatId,"Invalid market selection. Start the builder again.",MAIN_MENU);
+      return chooseBookingMarket(chatId,Number(match[1]),decodeURIComponent(match[2]));
+    }
+    if(action.startsWith("book_outcome_")){
+      const match=action.match(/^book_outcome_(\\d+)_([^_]+)_([^_]*)_(.+)$/);
+      if(!match) return sendText(chatId,"Invalid outcome selection. Start the builder again.",MAIN_MENU);
+      return addBookingOutcome(chatId,Number(match[1]),decodeURIComponent(match[2]),decodeURIComponent(match[3]),decodeURIComponent(match[4]));
+    }
+    if(action==="book_targets") return sendText(chatId,"Choose a target odds slip for today or tomorrow:",{inline_keyboard:[[10,20,50].map(n=>({text:`${n} odds today`,callback_data:`book_target_${n}`})),[100,500,1000].map(n=>({text:`${n} odds today`,callback_data:`book_target_${n}`})),[10,20,50].map(n=>({text:`${n} odds tomorrow`,callback_data:`book_target_tomorrow_${n}`})),[100,500,1000].map(n=>({text:`${n} odds tomorrow`,callback_data:`book_target_tomorrow_${n}`})),[{text:"⬅️ Main menu",callback_data:"menu"}]]});\n    if(action.startsWith("book_target_tomorrow_")) return buildTargetBooking(chatId,Number(action.slice("book_target_tomorrow_".length)),1);\n    if(action.startsWith("book_target_")) return buildTargetBooking(chatId,Number(action.slice("book_target_".length)),0);
+    if(action.startsWith("book_target_tomorrow_")) return buildTargetBooking(chatId,Number(action.slice("book_target_tomorrow_".length)),1);
+  }
   if(action==="menu") return sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);
   if(action==="help"||action==="search_help"){
     return sendText(chatId,action==="search_help"
