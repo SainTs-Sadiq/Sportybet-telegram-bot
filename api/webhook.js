@@ -245,7 +245,8 @@ async function setBotCommands(){
     {command:"leagues",description:"List tomorrow's leagues"},
     {command:"markets",description:"List tomorrow's markets"},
     {command:"search",description:"Search fixtures"},
-    {command:"analyze",description:"AI football analysis"},\n    {command:"book",description:"Build a SportyBet booking code"},
+    {command:"analyze",description:"AI football analysis"},
+    {command:"book",description:"Build a SportyBet booking code"},
     {command:"help",description:"Help"}
   ];
   try{await tg("setMyCommands",{commands})}catch(e){console.error(e)}
