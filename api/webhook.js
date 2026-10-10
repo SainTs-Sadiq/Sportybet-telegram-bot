@@ -2,7 +2,7 @@ import { getFixtures, filterByDay, createBooking } from "../lib/sportybet.js";
 import { makePdf, makeXlsx } from "../lib/reports.js";
 import { impliedProbability } from "../lib/football.js";
 import { getTeamFormAnalysis, blendFormAndMarket } from "../lib/team-history.js";
-import { marketCandidates, marketCandidatesFromOdds, rankWithAI, combinedOdds } from "../lib/ai.js";
+import { marketCandidates, marketCandidatesFromOdds, marketCandidatesFromAllOdds, rankWithAI, combinedOdds } from "../lib/ai.js";
 import { SPORTS, SPORT_ORDER, sportLabel, getSport } from "../lib/sports.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -143,15 +143,15 @@ async function analyzeDay(chatId,offset=1,requested=10){
   const fixtures=(await loadSportDay("football",offset)).filter(f=>Number(f.startMs)>Date.now());
   if(!fixtures.length){await sendText(chatId,"No football fixtures found for the selected day.");return;}
   await sendText(chatId,`🤖 Analyzing ${fixtures.length} football games using SportyBet odds and our probability calculations. API-Football is not required.`);
-  let candidates=fixtures.flatMap(f=>marketCandidatesFromOdds(f)).filter(x=>x.odds>1&&x.modelProbability>=35);
+  let candidates=fixtures.flatMap(f=>marketCandidatesFromAllOdds(f)).filter(x=>x.odds>1&&x.modelProbability>=35);
   candidates=await enrichCandidatesWithForm(fixtures,candidates,30);
   candidates.sort((a,b)=>Number(b.formDataAvailable)-Number(a.formDataAvailable)||b.modelProbability-a.modelProbability||a.odds-b.odds);
-  if(!candidates.length){await sendText(chatId,"⚠️ No fixtures had a usable active SportyBet 1X2 market. No picks were generated.");return;}
+  if(!candidates.length){await sendText(chatId,"⚠️ No fixtures had usable active SportyBet markets. No picks were generated.");return;}
   let picks;
   try { picks=await rankWithAI(candidates.slice(0,100),Math.min(20,Math.max(1,requested))); }
-  catch(e){console.error("AI ranking failed",e);picks=candidates.slice(0,Math.min(20,Math.max(1,requested))).map((p,i)=>({...p,rank:i+1,confidence:"Low",risk:"High",rationale:"Ranked by normalized SportyBet market-implied probability; AI ranking unavailable."}));}
+  catch(e){console.error("AI ranking failed",e);picks=candidates.slice(0,Math.min(20,Math.max(1,requested))).map((p,i)=>({...p,rank:i+1,confidence:"Low",risk:"High",rationale:"Ranked by market-normalized SportyBet probabilities; AI ranking unavailable."}));}
   if(!picks.length){await sendText(chatId,"⚠️ No selections were returned.");return;}
-  const lines=picks.map((p,i)=>`${i+1}. ${p.match}\n   🎯 ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}\n   📊 Blended probability: ${p.modelProbability.toFixed(1)}% | Raw implied: ${(impliedProbability(p.odds)*100).toFixed(1)}%\n   ${p.confidence||"Low"} confidence • ${p.risk||"High"} risk\n   ${p.formDataAvailable ? `Recent form: ${p.recentForm.homeForm.form} vs ${p.recentForm.awayForm.form}; goals for/against ${p.recentForm.homeForm.goalsFor}/${p.recentForm.homeForm.goalsAgainst} vs ${p.recentForm.awayForm.goalsFor}/${p.recentForm.awayForm.goalsAgainst}.` : "Historical form unavailable; market-only estimate."} ${p.rationale||p.reason}`);
+  const seenEvents=new Set();\n  picks=picks.filter(p=>{const key=String(p.eventId||p.match);if(seenEvents.has(key))return false;seenEvents.add(key);return true;}).slice(0,Math.min(20,Math.max(1,requested)));\n  const lines=picks.map((p,i)=>`${i+1}. ${p.match}\n   🎯 ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}\n   📊 Blended probability: ${p.modelProbability.toFixed(1)}% | Raw implied: ${(impliedProbability(p.odds)*100).toFixed(1)}%\n   ${p.confidence||"Low"} confidence • ${p.risk||"High"} risk\n   ${p.formDataAvailable ? `Recent form: ${p.recentForm.homeForm.form} vs ${p.recentForm.awayForm.form}; goals for/against ${p.recentForm.homeForm.goalsFor}/${p.recentForm.homeForm.goalsAgainst} vs ${p.recentForm.awayForm.goalsFor}/${p.recentForm.awayForm.goalsAgainst}.` : "Historical form unavailable; market-only estimate."} ${p.rationale||p.reason}`);
   await sendText(chatId,`🤖 AI FOOTBALL ANALYSIS — ${offset?"TOMORROW":"TODAY"}\n\n${lines.join("\n\n")}\n\n📈 Combined odds: ${combinedOdds(picks).toFixed(2)}\n\nℹ️ When historical results match, probabilities blend a goals-based form model with SportyBet market probabilities. Smaller leagues are covered when the historical provider has results; unmatched leagues fall back to market-only. Injuries and head-to-head are not modeled.\n\n⚠️ Statistical ranking, not a guarantee.`);
 }
 
@@ -234,17 +234,17 @@ async function buildTargetBooking(chatId,target,offset=0) {
   const useBothDays=target>=100, offsets=useBothDays?[0,1]:[offset];
   const periodLabel=useBothDays?"TODAY + TOMORROW":(offset?"TOMORROW":"TODAY");
   if(!process.env.GEMINI_API_KEY&&!process.env.OPENAI_API_KEY) return sendText(chatId,"⚠️ Add GEMINI_API_KEY or OPENAI_API_KEY in Vercel to enable AI ranking. No slip was built.",MAIN_MENU);
-  await sendText(chatId,`🔎 Checking all available SportyBet football fixtures for ${periodLabel.toLowerCase()}. Calculating normalized market probabilities and asking Gemini to rank candidates. API-Football is not required.`);
+  await sendText(chatId,`🔎 Checking all available SportyBet football fixtures for ${periodLabel.toLowerCase()}. Exploring active SportyBet markets (1X2, double chance, draw no bet, goals, both teams to score, halves and corners where available) and asking Gemini to rank candidates. API-Football is not required.`);
   const dayFixtures=await Promise.all(offsets.map(dayOffset=>loadSportDay("football",dayOffset)));
   const fixtures=[...new Map(dayFixtures.flat().map(f=>[String(f.eventId),f])).values()].filter(f=>Number(f.startMs)>Date.now());
   if(!fixtures.length) return sendText(chatId,`No upcoming football fixtures were found for ${periodLabel.toLowerCase()}.`,MAIN_MENU);
-  let candidates=fixtures.flatMap(f=>marketCandidatesFromOdds(f)).filter(p=>p.odds>1&&p.odds<=2.2&&p.eventId&&p.marketId&&p.outcomeId);
+  let candidates=fixtures.flatMap(f=>marketCandidatesFromAllOdds(f)).filter(p=>p.odds>1&&p.odds<=2.2&&p.eventId&&p.marketId&&p.outcomeId);
   candidates=await enrichCandidatesWithForm(fixtures,candidates,35);
   candidates=candidates.filter(p=>p.modelProbability>=50).sort((a,b)=>Number(b.formDataAvailable)-Number(a.formDataAvailable)||b.modelProbability-a.modelProbability||a.odds-b.odds);
   const bestByEvent=new Map();
   for(const p of candidates){const old=bestByEvent.get(String(p.eventId));if(!old||p.modelProbability>old.modelProbability)bestByEvent.set(String(p.eventId),p);}
   let ranked=[...bestByEvent.values()];
-  if(!ranked.length) return sendText(chatId,"⚠️ No active SportyBet 1X2 selections met the filters (normalized market probability ≥50%, odds ≤2.20). I won't add unsupported picks to force the target.",MAIN_MENU);
+  if(!ranked.length) return sendText(chatId,"⚠️ No active SportyBet 1X2 selections met the filters (market-normalized probability ≥50%, odds ≤2.20). I won't add unsupported picks to force the target.",MAIN_MENU);
   try {
     const aiRanked=await rankWithAI(ranked.map((p,i)=>({id:i+1,match:p.match,market:p.market,selection:p.selection,odds:p.odds,modelProbability:p.modelProbability,marketProbability:p.marketProbability,formDataAvailable:p.formDataAvailable,formSummary:p.recentForm?{home:p.recentForm.homeForm,away:p.recentForm.awayForm}:null,expectedGoals:p.recentForm?{home:p.recentForm.expectedGoalsHome,away:p.recentForm.expectedGoalsAway}:null,dataQuality:p.dataQuality,league:p.league,startMs:p.startMs,reason:p.reason})),ranked.length);
     const order=new Map(aiRanked.map((p,i)=>[Number(p.id),Number(p.rank)||i+1]));
@@ -257,7 +257,7 @@ async function buildTargetBooking(chatId,target,offset=0) {
   session.selections=picks.map(p=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:`${p.match} — ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}`}));
   const estimatedAllWin=picks.reduce((n,p)=>n*(Math.max(0,Math.min(100,p.modelProbability))/100),1)*100;
   const lines=picks.map((p,i)=>`${i+1}. ${p.match}\n   🎯 ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}\n   📊 Normalized market probability: ${p.modelProbability.toFixed(1)}%\n   🏆 ${p.league||"League not provided"}`);
-  await sendText(chatId,`🎯 STATS-FILTERED TARGET SLIP — ${periodLabel}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}/50\nMethod: historical results, recent form, goals scored/conceded and home/away splits blended with SportyBet market probabilities; Gemini ranks candidates. Matches without history fall back to market-only estimates.\n\n${lines.join("\n\n")}\n\n📉 Product of normalized market probabilities: ${estimatedAllWin.toFixed(3)}% (rough illustration only, not a calibrated accumulator probability).\n\n⚠️ High combined odds still mean a low chance of every leg winning. Automatically requesting the booking code now.`);
+  await sendText(chatId,`🎯 STATS-FILTERED TARGET SLIP — ${periodLabel}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}/50\nMethod: explore active SportyBet markets including 1X2, double chance, draw no bet, totals, both teams to score, halves and corners where available. Historical form is applied where the outcome can be mapped reliably; other markets use normalized prices. Gemini ranks candidates. One selection per event.\n\n${lines.join("\n\n")}\n\n📉 Product of normalized market probabilities: ${estimatedAllWin.toFixed(3)}% (rough illustration only, not a calibrated accumulator probability).\n\n⚠️ High combined odds still mean a low chance of every leg winning. Automatically requesting the booking code now.`);
   try {
     const result=await createBooking(session.selections), expiry=result.deadline?new Date(result.deadline).toLocaleString("en-GB",{timeZone:TZ}):"Not provided";
     const code=result.shareCode?`\n\nBooking code: ${result.shareCode}`:"", url=result.shareURL?`\nOpen slip: ${result.shareURL}`:"";
