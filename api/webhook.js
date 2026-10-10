@@ -233,8 +233,19 @@ async function buildTargetBooking(chatId,target,offset=0) {
   if(product<target) return sendText(chatId,`Only ${product.toFixed(2)} combined odds could be built from ${picks.length} eligible games. There are not enough suitable fixtures to reach ${target} today. Try tomorrow or a lower target.`,MAIN_MENU);
   const session=getBookingSession(chatId);
   session.fixtures=fixtures;
-  session.selections=picks.map((p,i)=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:p.label}));
-  await sendText(chatId,`🎯 TARGET ODDS SLIP — ${offset?"TOMORROW":"TODAY"}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}\nMethod: lowest odds first, one selection per fixture, limited to 1X2 and Double Chance markets.\n\n${picks.map((p,i)=>`${i+1}. ${p.label}`).join("\n")}\n\nReview before generating. These odds can change and this is not a prediction of guaranteed wins.`,{inline_keyboard:[[{text:"✅ Review & generate code",callback_data:"book_view"}],[{text:"🗑 Clear slip",callback_data:"book_clear"},{text:"⬅️ Main menu",callback_data:"menu"}]]});
+  session.selections=picks.map((p)=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:p.label}));
+  await sendText(chatId,`🎯 TARGET ODDS SLIP — ${offset?"TOMORROW":"TODAY"}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}\nMethod: lowest odds first, one selection per fixture, limited to 1X2 and Double Chance markets.\n\n${picks.map((p,i)=>`${i+1}. ${p.label}`).join("\n")}\n\n⏳ Automatically requesting a SportyBet booking code for these exact selections. Odds may change; this is not a prediction of guaranteed wins.`);
+  try {
+    const result=await createBooking(session.selections);
+    const expiry=result.deadline ? new Date(result.deadline).toLocaleString("en-GB",{timeZone:TZ}) : "Not provided";
+    const code=result.shareCode ? `\n\nBooking code: ${result.shareCode}` : "";
+    const url=result.shareURL ? `\nOpen slip: ${result.shareURL}` : "";
+    const unavailable=result.unavailableOutcomes?.length ? `\n\n⚠️ SportyBet could not include ${result.unavailableOutcomes.length} selection(s). Check the shared slip before using it.` : "";
+    await sendText(chatId,`✅ SPORTYBET BOOKING CODE CREATED${code}${url}\n\nSelections requested: ${session.selections.length}\nExpiry: ${expiry}${unavailable}\n\nThis is a shareable/reserved slip only. No bet has been placed and no money has been staked.`,MAIN_MENU);
+  } catch (e) {
+    console.error("Automatic booking-code creation failed",e);
+    await sendText(chatId,`⚠️ The odds slip was built, but SportyBet did not return a booking code: ${e.message||"request failed"}. Your selections are saved in this chat session; tap View slip to retry manually.`,bookingKeyboard([]));
+  }
 }
 
 async function handleAction(chatId,action){
