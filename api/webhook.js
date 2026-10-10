@@ -33,7 +33,8 @@ const MAIN_MENU={inline_keyboard:[
   [{text:"🌎 All Sports PDF — Today",callback_data:"pdf_today"},{text:"🌎 All Sports PDF — Tomorrow",callback_data:"pdf_tomorrow"}],
   [{text:"📊 All Sports Excel — Today",callback_data:"excel_today"},{text:"📊 All Sports Excel — Tomorrow",callback_data:"excel_tomorrow"}],
   [{text:"🤖 AI 10 Picks",callback_data:"ai_tomorrow_10"},{text:"🤖 AI 20 Picks",callback_data:"ai_tomorrow_20"}],
-  [{text:"🎟️ Build Booking Code",callback_data:"book_start"}],\n  [{text:"🎯 Target Odds 10/20/50/100/500/1000",callback_data:"book_targets"}],
+  [{text:"🎟️ Build Booking Code",callback_data:"book_start"}],
+  [{text:"🎯 Target Odds 10/20/50/100/500/1000",callback_data:"book_targets"}],
   [{text:"🏆 Leagues",callback_data:"leagues"},{text:"📈 Markets",callback_data:"markets"}],
   [{text:"🔎 Search",callback_data:"search_help"},{text:"ℹ️ Help",callback_data:"help"}]
 ]};
@@ -235,7 +236,8 @@ async function buildTargetBooking(chatId,target,offset=0) {
   session.selections=picks.map((p,i)=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:p.label}));
   await sendText(chatId,`🎯 TARGET ODDS SLIP — ${offset?"TOMORROW":"TODAY"}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}\nMethod: lowest odds first, one selection per fixture, limited to 1X2 and Double Chance markets.\n\n${picks.map((p,i)=>`${i+1}. ${p.label}`).join("\n")}\n\nReview before generating. These odds can change and this is not a prediction of guaranteed wins.`,{inline_keyboard:[[{text:"✅ Review & generate code",callback_data:"book_view"}],[{text:"🗑 Clear slip",callback_data:"book_clear"},{text:"⬅️ Main menu",callback_data:"menu"}]]});
 }
-\nasync function handleAction(chatId,action){
+
+async function handleAction(chatId,action){
   if(action.startsWith("book_")){
     if(action==="book_start") return startBooking(chatId);
     if(action==="book_view") return viewBooking(chatId);
