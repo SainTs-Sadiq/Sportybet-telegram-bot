@@ -226,11 +226,13 @@ async function buildTargetBooking(chatId,target,offset=0) {
   candidates.sort((a,b)=>a.odds-b.odds || a.startMs-b.startMs);
   if(!candidates.length) return sendText(chatId,"No suitable upcoming fixtures with active low-odds 1X2/Double Chance outcomes were found for that day.",MAIN_MENU);
   const picks=[]; let product=1;
+  // SportyBet share slips accept at most 30 selections. Never send an oversized
+  // target slip to the booking endpoint.
   for(const pick of candidates) {
-    if(product>=target) break;
+    if(product>=target || picks.length>=30) break;
     picks.push(pick); product*=pick.odds;
   }
-  if(product<target) return sendText(chatId,`Only ${product.toFixed(2)} combined odds could be built from ${picks.length} eligible games. There are not enough suitable fixtures to reach ${target} today. Try tomorrow or a lower target.`,MAIN_MENU);
+  if(product<target) return sendText(chatId,`I found ${picks.length} eligible games, reaching ${product.toFixed(2)} combined odds. SportyBet allows at most 30 selections per booking code, so I won't send an oversized slip. Try a lower target or choose tomorrow if more fixtures are available.`,MAIN_MENU);
   const session=getBookingSession(chatId);
   session.fixtures=fixtures;
   session.selections=picks.map((p)=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:p.label}));
