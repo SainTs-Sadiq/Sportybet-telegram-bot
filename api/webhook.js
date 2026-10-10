@@ -260,7 +260,8 @@ async function handleWebhook(req,res){
   try{
     if(callback){await answerCallback(callback.id);await handleAction(chatId,callback.data);return res.status(200).json({ok:true});}
     const raw=(msg.text||"").trim(), text=raw.toLowerCase(), command=text.split(/\s+/)[0];
-    if(command==="/book"){await startBooking(chatId);return res.status(200).json({ok:true});}\n    if(command==="/start"||command==="/help"){await setBotCommands();await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
+    if(command==="/book"){await startBooking(chatId);return res.status(200).json({ok:true});}
+    if(command==="/start"||command==="/help"){await setBotCommands();await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
     if(command==="/fixtures"||command==="/football"||command==="/basketball"||command==="/tennis"){
       const sport=command==="/fixtures"?"all":command.slice(1);
       await sendText(chatId,sport==="all"?"📋 Choose sport and date:":`${sportLabel(sport)}\n\nChoose date:`,SPORT_MENU());return res.status(200).json({ok:true});
