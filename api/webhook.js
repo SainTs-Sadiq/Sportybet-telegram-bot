@@ -206,8 +206,16 @@ async function createBookingForChat(chatId) {
 async function buildTargetBooking(chatId,target,offset=0) {
   const allowed=[10,20,50,100,500,1000];
   if(!allowed.includes(target)) return sendText(chatId,"Choose a supported target odds value.",MAIN_MENU);
-  await sendText(chatId,`⏳ Finding the lowest available odds for ${offset?"tomorrow":"today"} and building a slip targeting ${target} odds...`);
-  const fixtures=await loadSportDay("football",offset);
+
+  // Higher targets can pool low-odds fixtures from both calendar days to reach
+  // the target without exceeding SportyBet's 50-selection share-slip limit.
+  const useBothDays = target >= 100;
+  const offsets = useBothDays ? [0,1] : [offset];
+  const periodLabel = useBothDays ? "TODAY + TOMORROW" : (offset ? "TOMORROW" : "TODAY");
+  await sendText(chatId,`⏳ Finding the lowest available odds for ${periodLabel.toLowerCase()} and building a slip targeting ${target} odds...`);
+
+  const dayFixtures = await Promise.all(offsets.map(dayOffset => loadSportDay("football",dayOffset)));
+  const fixtures = [...new Map(dayFixtures.flat().map(f => [String(f.eventId),f])).values()];
   const candidates=[];
   for(const f of fixtures) {
     if(Number(f.startMs)<=Date.now()) continue;
@@ -224,19 +232,20 @@ async function buildTargetBooking(chatId,target,offset=0) {
     if(choices.length) candidates.push(choices[0]);
   }
   candidates.sort((a,b)=>a.odds-b.odds || a.startMs-b.startMs);
-  if(!candidates.length) return sendText(chatId,"No suitable upcoming fixtures with active low-odds 1X2/Double Chance outcomes were found for that day.",MAIN_MENU);
+  if(!candidates.length) return sendText(chatId,`No suitable upcoming fixtures with active low-odds 1X2/Double Chance outcomes were found for ${periodLabel.toLowerCase()}.`,MAIN_MENU);
+
   const picks=[]; let product=1;
-  // SportyBet share slips accept at most 50 selections. Never send an oversized
-  // target slip to the booking endpoint.
+  // SportyBet share slips accept at most 50 selections.
   for(const pick of candidates) {
     if(product>=target || picks.length>=50) break;
     picks.push(pick); product*=pick.odds;
   }
-  if(product<target) return sendText(chatId,`I found ${picks.length} eligible games, reaching ${product.toFixed(2)} combined odds. SportyBet allows at most 50 selections per booking code, so I won't send an oversized slip. Try a lower target or choose tomorrow if more fixtures are available.`,MAIN_MENU);
+  if(product<target) return sendText(chatId,`I found ${picks.length} eligible games across ${periodLabel.toLowerCase()}, reaching ${product.toFixed(2)} combined odds. SportyBet allows at most 50 selections per booking code, so I won't send an oversized slip. Try again later when more suitable fixtures are available or choose a lower target.`,MAIN_MENU);
+
   const session=getBookingSession(chatId);
   session.fixtures=fixtures;
   session.selections=picks.map((p)=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:p.label}));
-  await sendText(chatId,`🎯 TARGET ODDS SLIP — ${offset?"TOMORROW":"TODAY"}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}\nMethod: lowest odds first, one selection per fixture, limited to 1X2 and Double Chance markets.\n\n${picks.map((p,i)=>`${i+1}. ${p.label}`).join("\n")}\n\n⏳ Automatically requesting a SportyBet booking code for these exact selections. Odds may change; this is not a prediction of guaranteed wins.`);
+  await sendText(chatId,`🎯 TARGET ODDS SLIP — ${periodLabel}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}\nFixture window: ${periodLabel.toLowerCase()}\nMethod: lowest available odds first, one selection per fixture, limited to 1X2 and Double Chance markets.\n\n${picks.map((p,i)=>`${i+1}. ${p.label}`).join("\n")}\n\n⏳ Automatically requesting a SportyBet booking code for these exact selections. Odds may change; this is not a prediction of guaranteed wins.`);
   try {
     const result=await createBooking(session.selections);
     const expiry=result.deadline ? new Date(result.deadline).toLocaleString("en-GB",{timeZone:TZ}) : "Not provided";
