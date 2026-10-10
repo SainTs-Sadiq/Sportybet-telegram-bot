@@ -207,55 +207,78 @@ async function buildTargetBooking(chatId,target,offset=0) {
   const allowed=[10,20,50,100,500,1000];
   if(!allowed.includes(target)) return sendText(chatId,"Choose a supported target odds value.",MAIN_MENU);
 
-  // Higher targets can pool low-odds fixtures from both calendar days to reach
-  // the target without exceeding SportyBet's 50-selection share-slip limit.
+  // 100+ target slips combine today and tomorrow. Only use fixtures that can
+  // be matched to API-Football predictions; never pad a slip with unsupported picks.
   const useBothDays = target >= 100;
   const offsets = useBothDays ? [0,1] : [offset];
   const periodLabel = useBothDays ? "TODAY + TOMORROW" : (offset ? "TOMORROW" : "TODAY");
-  await sendText(chatId,`⏳ Finding the lowest available odds for ${periodLabel.toLowerCase()} and building a slip targeting ${target} odds...`);
+  await sendText(chatId,`🔎 Checking fixture data and model probabilities for ${periodLabel.toLowerCase()} before building a ${target}-odds slip. Picks below the confidence threshold will be excluded.`);
 
   const dayFixtures = await Promise.all(offsets.map(dayOffset => loadSportDay("football",dayOffset)));
-  const fixtures = [...new Map(dayFixtures.flat().map(f => [String(f.eventId),f])).values()];
-  const candidates=[];
-  for(const f of fixtures) {
-    if(Number(f.startMs)<=Date.now()) continue;
-    const choices=[];
-    for(const m of (f.markets||[])) {
-      // Use only widely understood pre-match markets, and prefer the lowest odds.
-      if(!["1","10"].includes(String(m.id))) continue;
-      for(const o of (m.outcomes||[])) {
-        const odds=Number(o.odds);
-        if(o.active && odds>1 && odds<=2.2) choices.push({eventId:f.eventId,marketId:String(m.id),specifier:String(m.specifier||""),outcomeId:String(o.id),odds,startMs:Number(f.startMs),label:`${f.homeTeam} vs ${f.awayTeam} — ${m.name}: ${o.name} @ ${odds.toFixed(2)}`,league:f.league});
-      }
-    }
-    choices.sort((a,b)=>a.odds-b.odds);
-    if(choices.length) candidates.push(choices[0]);
-  }
-  candidates.sort((a,b)=>a.odds-b.odds || a.startMs-b.startMs);
-  if(!candidates.length) return sendText(chatId,`No suitable upcoming fixtures with active low-odds 1X2/Double Chance outcomes were found for ${periodLabel.toLowerCase()}.`,MAIN_MENU);
+  const fixtures = [...new Map(dayFixtures.flat().map(f => [String(f.eventId),f])).values()]
+    .filter(f => Number(f.startMs)>Date.now());
+  if(!fixtures.length) return sendText(chatId,`No upcoming football fixtures were found for ${periodLabel.toLowerCase()}.`,MAIN_MENU);
+
+  const apiDays = await Promise.all(offsets.map(async dayOffset => {
+    try { return await getDailyFixtures(dateForOffset(dayOffset)); }
+    catch(e) { console.error("API-Football fixture lookup failed",e); return []; }
+  }));
+  const apiFixtures = [...new Map(apiDays.flat().map(f => [String(f.fixture?.id),f]).filter(([id])=>id && id!=="undefined")).values()];
+  if(!apiFixtures.length) return sendText(chatId,"⚠️ I couldn't retrieve matching statistical-provider fixtures. No picks were generated; try again when the stats feed is available.",MAIN_MENU);
+
+  const matched = buildCandidates(fixtures,apiFixtures,100)
+    .filter(x=>x.matchScore>=0.65);
+  const predictions = await Promise.all(matched.map(async c => {
+    try {
+      const prediction = await getPredictions(c.api.fixture?.id);
+      return prediction ? {...c,prediction} : null;
+    } catch(e) { console.error("Prediction lookup failed",e); return null; }
+  }));
+  const candidates = predictions.filter(Boolean).flatMap(c =>
+    marketCandidates(c.sporty,c.prediction).map(p=>({
+      ...p, eventId:c.sporty.eventId, league:c.sporty.league,
+      marketId:String((c.sporty.markets||[]).find(m=>m.name.toLowerCase().includes("1x2") && (m.outcomes||[]).some(o=>o.name.toLowerCase()===p.selection.toLowerCase()))?.id||""),
+      specifier:String((c.sporty.markets||[]).find(m=>m.name.toLowerCase().includes("1x2") && (m.outcomes||[]).some(o=>o.name.toLowerCase()===p.selection.toLowerCase()))?.specifier||""),
+      outcomeId:String((c.sporty.markets||[]).find(m=>m.name.toLowerCase().includes("1x2") && (m.outcomes||[]).some(o=>o.name.toLowerCase()===p.selection.toLowerCase()))?.outcomes?.find(o=>o.name.toLowerCase()===p.selection.toLowerCase())?.id||""),
+      startMs:Number(c.sporty.startMs), matchScore:c.matchScore,
+      probability:Number(p.modelProbability)||0
+    }))
+  ).filter(p=>p.marketId && p.outcomeId && p.odds>1 && p.odds<=2.2 && p.probability>=65)
+   .sort((a,b)=>b.probability-a.probability || (b.edge??-99)-(a.edge??-99) || a.odds-b.odds);
+
+  // One selection per match, with the strongest qualifying model probability.
+  const bestByEvent=new Map();
+  for(const p of candidates) if(!bestByEvent.has(String(p.eventId))) bestByEvent.set(String(p.eventId),p);
+  const ranked=[...bestByEvent.values()];
+  if(!ranked.length) return sendText(chatId,"⚠️ No selections met the current filters (API-Football match confidence ≥65%, odds 1.01–2.20, and a valid SportyBet 1X2 market). I won't invent or add weaker picks just to reach a target.",MAIN_MENU);
 
   const picks=[]; let product=1;
-  // SportyBet share slips accept at most 50 selections.
-  for(const pick of candidates) {
+  for(const pick of ranked) {
     if(product>=target || picks.length>=50) break;
     picks.push(pick); product*=pick.odds;
   }
-  if(product<target) return sendText(chatId,`I found ${picks.length} eligible games across ${periodLabel.toLowerCase()}, reaching ${product.toFixed(2)} combined odds. SportyBet allows at most 50 selections per booking code, so I won't send an oversized slip. Try again later when more suitable fixtures are available or choose a lower target.`,MAIN_MENU);
+  if(product<target) {
+    const bestOdds=ranked.slice(0,50).reduce((n,p)=>n*p.odds,1);
+    const highestProb=Math.max(...ranked.map(p=>p.probability));
+    return sendText(chatId,`⚠️ I found only ${ranked.length} qualifying games across ${periodLabel.toLowerCase()}. Their combined odds are ${bestOdds.toFixed(2)} (max 50 selections), below your ${target} target. Highest model probability among qualifying picks: ${highestProb.toFixed(1)}%. I won't lower the confidence filter just to force the odds. Try a lower target or run it again when more suitable fixtures are available.`,MAIN_MENU);
+  }
 
   const session=getBookingSession(chatId);
   session.fixtures=fixtures;
-  session.selections=picks.map((p)=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:p.label}));
-  await sendText(chatId,`🎯 TARGET ODDS SLIP — ${periodLabel}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}\nFixture window: ${periodLabel.toLowerCase()}\nMethod: lowest available odds first, one selection per fixture, limited to 1X2 and Double Chance markets.\n\n${picks.map((p,i)=>`${i+1}. ${p.label}`).join("\n")}\n\n⏳ Automatically requesting a SportyBet booking code for these exact selections. Odds may change; this is not a prediction of guaranteed wins.`);
+  session.selections=picks.map(p=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:`${p.match} — ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}`}));
+  const estimatedAllWin=picks.reduce((n,p)=>n*(Math.max(0,Math.min(100,p.probability))/100),1)*100;
+  const lines=picks.map((p,i)=>`${i+1}. ${p.match}\n   🎯 ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}\n   📊 Model probability: ${p.probability.toFixed(1)}% • Match-data match: ${(p.matchScore*100).toFixed(0)}%\n   🏆 ${p.league||"League not provided"}`);
+  await sendText(chatId,`🎯 STATS-FILTERED TARGET SLIP — ${periodLabel}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}/50\nFilter: model probability ≥65%; odds ≤2.20; one pick per match; only matched API-Football predictions and active SportyBet 1X2 markets.\n\n${lines.join("\n\n")}\n\n📉 Simple independence estimate that every pick wins: ${estimatedAllWin.toFixed(3)}% (rough illustration, not a calibrated accumulator probability).\n\n⚠️ Model percentages are estimates, not guarantees. High combined odds still mean a low chance of every leg winning. Automatically requesting the booking code now.`);
   try {
     const result=await createBooking(session.selections);
     const expiry=result.deadline ? new Date(result.deadline).toLocaleString("en-GB",{timeZone:TZ}) : "Not provided";
     const code=result.shareCode ? `\n\nBooking code: ${result.shareCode}` : "";
     const url=result.shareURL ? `\nOpen slip: ${result.shareURL}` : "";
     const unavailable=result.unavailableOutcomes?.length ? `\n\n⚠️ SportyBet could not include ${result.unavailableOutcomes.length} selection(s). Check the shared slip before using it.` : "";
-    await sendText(chatId,`✅ SPORTYBET BOOKING CODE CREATED${code}${url}\n\nSelections requested: ${session.selections.length}\nExpiry: ${expiry}${unavailable}\n\nThis is a shareable/reserved slip only. No bet has been placed and no money has been staked.`,MAIN_MENU);
-  } catch (e) {
+    await sendText(chatId,`✅ SPORTYBET BOOKING CODE CREATED${code}${url}\n\nSelections requested: ${session.selections.length}\nExpiry: ${expiry}${unavailable}\n\nThis is a shareable slip only. No bet has been placed and no money has been staked.`,MAIN_MENU);
+  } catch(e) {
     console.error("Automatic booking-code creation failed",e);
-    await sendText(chatId,`⚠️ The odds slip was built, but SportyBet did not return a booking code: ${e.message||"request failed"}. Your selections are saved in this chat session; tap View slip to retry manually.`,bookingKeyboard([]));
+    await sendText(chatId,`⚠️ The stats-filtered slip was built, but SportyBet did not return a booking code: ${e.message||"request failed"}. Your selections remain in this chat session; tap View slip to review.`,bookingKeyboard([]));
   }
 }
 
