@@ -114,7 +114,7 @@ async function runReport(chatId,action,sport="all"){
 
 async function analyzeDay(chatId,offset=1,requested=10){
   if(!process.env.API_FOOTBALL_KEY) throw new Error("AI analysis needs API_FOOTBALL_KEY in Vercel.");
-  if(!process.env.OPENAI_API_KEY) throw new Error("AI analysis needs OPENAI_API_KEY in Vercel.");
+  if(!process.env.GEMINI_API_KEY && !process.env.OPENAI_API_KEY) throw new Error("AI analysis needs GEMINI_API_KEY (recommended free-tier option) or OPENAI_API_KEY in Vercel.");
   const fixtures=await loadSportDay("football",offset);
   if(!fixtures.length){await sendText(chatId,"No football fixtures found for the selected day.");return;}
   await sendText(chatId,`🤖 Analyzing ${fixtures.length} football games...\n\nThe multi-sport fixture/report system is separate from the football AI model for now.`);
