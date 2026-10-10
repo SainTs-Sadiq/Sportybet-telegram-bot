@@ -143,14 +143,16 @@ async function analyzeDay(chatId,offset=1,requested=10){
   const fixtures=(await loadSportDay("football",offset)).filter(f=>Number(f.startMs)>Date.now());
   if(!fixtures.length){await sendText(chatId,"No football fixtures found for the selected day.");return;}
   await sendText(chatId,`🤖 Analyzing ${fixtures.length} football games using SportyBet odds and our probability calculations. API-Football is not required.`);
-  const candidates=fixtures.flatMap(f=>marketCandidatesFromOdds(f)).filter(x=>x.odds>1&&x.modelProbability>=35).sort((a,b)=>b.modelProbability-a.modelProbability||a.odds-b.odds);
+  let candidates=fixtures.flatMap(f=>marketCandidatesFromOdds(f)).filter(x=>x.odds>1&&x.modelProbability>=35);
+  candidates=await enrichCandidatesWithForm(fixtures,candidates,30);
+  candidates.sort((a,b)=>Number(b.formDataAvailable)-Number(a.formDataAvailable)||b.modelProbability-a.modelProbability||a.odds-b.odds);
   if(!candidates.length){await sendText(chatId,"⚠️ No fixtures had a usable active SportyBet 1X2 market. No picks were generated.");return;}
   let picks;
   try { picks=await rankWithAI(candidates.slice(0,100),Math.min(20,Math.max(1,requested))); }
   catch(e){console.error("AI ranking failed",e);picks=candidates.slice(0,Math.min(20,Math.max(1,requested))).map((p,i)=>({...p,rank:i+1,confidence:"Low",risk:"High",rationale:"Ranked by normalized SportyBet market-implied probability; AI ranking unavailable."}));}
   if(!picks.length){await sendText(chatId,"⚠️ No selections were returned.");return;}
-  const lines=picks.map((p,i)=>`${i+1}. ${p.match}\n   🎯 ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}\n   📊 Blended probability: ${p.modelProbability.toFixed(1)}% | Raw implied: ${(impliedProbability(p.odds)*100).toFixed(1)}%\n   ${p.confidence||"Low"} confidence • ${p.risk||"High"} risk\n   ${p.rationale||p.reason}`);
-  await sendText(chatId,`🤖 AI FOOTBALL ANALYSIS — ${offset?"TOMORROW":"TODAY"}\n\n${lines.join("\n\n")}\n\n📈 Combined odds: ${combinedOdds(picks).toFixed(2)}\n\nℹ️ Probabilities are normalized from SportyBet's own odds, not independent form-based forecasts. Smaller leagues are covered when SportyBet lists an active 1X2 market; recent form, injuries, and head-to-head are not independently verified.\n\n⚠️ Statistical ranking, not a guarantee.`);
+  const lines=picks.map((p,i)=>`${i+1}. ${p.match}\n   🎯 ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}\n   📊 Blended probability: ${p.modelProbability.toFixed(1)}% | Raw implied: ${(impliedProbability(p.odds)*100).toFixed(1)}%\n   ${p.confidence||"Low"} confidence • ${p.risk||"High"} risk\n   ${p.formDataAvailable ? `Recent form: ${p.recentForm.homeForm.form} vs ${p.recentForm.awayForm.form}; goals for/against ${p.recentForm.homeForm.goalsFor}/${p.recentForm.homeForm.goalsAgainst} vs ${p.recentForm.awayForm.goalsFor}/${p.recentForm.awayForm.goalsAgainst}.` : "Historical form unavailable; market-only estimate."} ${p.rationale||p.reason}`);
+  await sendText(chatId,`🤖 AI FOOTBALL ANALYSIS — ${offset?"TOMORROW":"TODAY"}\n\n${lines.join("\n\n")}\n\n📈 Combined odds: ${combinedOdds(picks).toFixed(2)}\n\nℹ️ When historical results match, probabilities blend a goals-based form model with SportyBet market probabilities. Smaller leagues are covered when the historical provider has results; unmatched leagues fall back to market-only. Injuries and head-to-head are not modeled.\n\n⚠️ Statistical ranking, not a guarantee.`);
 }
 
 
