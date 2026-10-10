@@ -28,7 +28,7 @@ async function sendDocument(chatId,buffer,filename,caption){
 }
 
 const MAIN_MENU={inline_keyboard:[
-  [{text:"⚽ Football",callback_data:"sport_football_today"},{text:"🏀 Basketball",callback_data:"sport_basketball_today"},{text:"🎾 Tennis",callback_data:"sport_tennis_today"}],
+  [{text:"⚽ Football — Today",callback_data:"sport_football_today"},{text:"⚽ Football — Tomorrow",callback_data:"sport_football_tomorrow"}],
   [{text:"📋 All Sports Today",callback_data:"all_today"},{text:"📅 All Sports Tomorrow",callback_data:"all_tomorrow"}],
   [{text:"🌎 All Sports PDF — Today",callback_data:"pdf_today"},{text:"🌎 All Sports PDF — Tomorrow",callback_data:"pdf_tomorrow"}],
   [{text:"📊 All Sports Excel — Today",callback_data:"excel_today"},{text:"📊 All Sports Excel — Tomorrow",callback_data:"excel_tomorrow"}],
