@@ -245,18 +245,18 @@ async function handleAction(chatId,action){
     if(action==="book_create") return createBookingForChat(chatId);
     if(action.startsWith("book_event_")) return chooseBookingEvent(chatId,Number(action.slice("book_event_".length)));
     if(action.startsWith("book_market_")){
-      const match=action.match(/^book_market_(\\d+)_(.+)$/);
+      const match=action.match(/^book_market_(\d+)_(.+)$/);
       if(!match) return sendText(chatId,"Invalid market selection. Start the builder again.",MAIN_MENU);
       return chooseBookingMarket(chatId,Number(match[1]),decodeURIComponent(match[2]));
     }
     if(action.startsWith("book_outcome_")){
-      const match=action.match(/^book_outcome_(\\d+)_([^_]+)_([^_]*)_(.+)$/);
+      const match=action.match(/^book_outcome_(\d+)_([^_]+)_([^_]*)_(.+)$/);
       if(!match) return sendText(chatId,"Invalid outcome selection. Start the builder again.",MAIN_MENU);
       return addBookingOutcome(chatId,Number(match[1]),decodeURIComponent(match[2]),decodeURIComponent(match[3]),decodeURIComponent(match[4]));
     }
     if(action==="book_targets") return sendText(chatId,"Choose a target odds slip for today or tomorrow:",{inline_keyboard:[[10,20,50].map(n=>({text:`${n} odds today`,callback_data:`book_target_${n}`})),[100,500,1000].map(n=>({text:`${n} odds today`,callback_data:`book_target_${n}`})),[10,20,50].map(n=>({text:`${n} odds tomorrow`,callback_data:`book_target_tomorrow_${n}`})),[100,500,1000].map(n=>({text:`${n} odds tomorrow`,callback_data:`book_target_tomorrow_${n}`})),[{text:"⬅️ Main menu",callback_data:"menu"}]]});
-    if(action.startsWith("book_target_")) return buildTargetBooking(chatId,Number(action.slice("book_target_".length)),0);
     if(action.startsWith("book_target_tomorrow_")) return buildTargetBooking(chatId,Number(action.slice("book_target_tomorrow_".length)),1);
+    if(action.startsWith("book_target_")) return buildTargetBooking(chatId,Number(action.slice("book_target_".length)),0);
   }
   if(action==="menu") return sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);
   if(action==="help"||action==="search_help"){
