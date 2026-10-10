@@ -1,6 +1,7 @@
 import { getFixtures, filterByDay, createBooking } from "../lib/sportybet.js";
 import { makePdf, makeXlsx } from "../lib/reports.js";
 import { impliedProbability } from "../lib/football.js";
+import { getTeamFormAnalysis, blendFormAndMarket } from "../lib/team-history.js";
 import { marketCandidates, marketCandidatesFromOdds, rankWithAI, combinedOdds } from "../lib/ai.js";
 import { SPORTS, SPORT_ORDER, sportLabel, getSport } from "../lib/sports.js";
 
@@ -67,6 +68,31 @@ async function loadSportDay(sport,offset){
   const fixtures=filterByDay(verified,offset,TZ).map(f=>({...f,sport:sportLabel(sport)}));
   console.log("[fixtures-day-debug]", JSON.stringify({ sport, offset, requestedSportId:expectedSportId, rawCount:raw.length, verifiedCount:verified.length, dayCount:fixtures.length, timezone:TZ }));
   cache.set(key,{at:Date.now(),fixtures}); return fixtures;
+}
+
+const formRequestCache = new Map();
+async function enrichCandidatesWithForm(fixtures,candidates,maxLeagues=30) {
+  const byEvent = new Map(fixtures.map(f=>[String(f.eventId),f]));
+  const leagueNames = [...new Set(fixtures.map(f=>f.league).filter(Boolean))].slice(0,maxLeagues);
+  const analyses = new Map();
+  for (const fixture of fixtures) {
+    if (!leagueNames.includes(fixture.league) || analyses.has(String(fixture.eventId))) continue;
+    const key = [fixture.league,fixture.homeTeam,fixture.awayTeam].join("|");
+    try {
+      let promise=formRequestCache.get(key);
+      if(!promise){promise=getTeamFormAnalysis(fixture);formRequestCache.set(key,promise);}
+      const form=await promise;
+      if(form) analyses.set(String(fixture.eventId),form);
+    } catch(e) { console.warn("[team-form-analysis]",fixture.league,e.message); }
+  }
+  const enriched=candidates.map(p=>{
+    const fixture=byEvent.get(String(p.eventId)), form=analyses.get(String(p.eventId));
+    if(!fixture||!form) return {...p,formDataAvailable:false,analysisSource:"market-only"};
+    const result=blendFormAndMarket(form,[{...p,homeTeam:fixture.homeTeam,awayTeam:fixture.awayTeam}])[0];
+    return {...result,formDataAvailable:Boolean(result.formDataAvailable),recentForm:form};
+  });
+  console.log("[team-form-summary]",JSON.stringify({fixtures:fixtures.length,candidates:candidates.length,withForm:enriched.filter(p=>p.formDataAvailable).length}));
+  return enriched;
 }
 
 async function loadDay(sport,offset){
