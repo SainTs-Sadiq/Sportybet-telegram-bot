@@ -178,7 +178,7 @@ async function addBookingOutcome(chatId,index,marketId,specifier,outcomeId) {
   const key=[f.eventId,m.id,m.specifier||"",o.id].join(":");
   if(s.selections.some(x=>x.key===key)) return sendText(chatId,"That selection is already in your slip.",bookingKeyboard([]));
   if(s.selections.some(x=>x.eventId===f.eventId)) return sendText(chatId,"Only one selection per event is supported in this builder. Choose a different fixture.",bookingKeyboard([]));
-  if(s.selections.length>=20) return sendText(chatId,"Your slip has reached the 20-selection limit.",bookingKeyboard([]));
+  if(s.selections.length>=50) return sendText(chatId,"Your slip has reached SportyBet's 50-selection limit.",bookingKeyboard([]));
   s.selections.push({key,eventId:f.eventId,marketId:String(m.id),specifier:String(m.specifier||""),outcomeId:String(o.id),label:`${f.homeTeam} vs ${f.awayTeam} — ${m.name}: ${o.name} @ ${Number(o.odds).toFixed(2)}`,odds:Number(o.odds),startMs:Number(f.startMs)});
   await sendText(chatId,`✅ Added to slip (${s.selections.length}/20)\n${s.selections[s.selections.length-1].label}\n\nContinue selecting fixtures or view your slip.`,bookingKeyboard(s.fixtures.map((x,i)=>[{text:`${x.homeTeam} vs ${x.awayTeam}`,callback_data:`book_event_${i}`}]).slice(0,12)));
 }
@@ -226,13 +226,13 @@ async function buildTargetBooking(chatId,target,offset=0) {
   candidates.sort((a,b)=>a.odds-b.odds || a.startMs-b.startMs);
   if(!candidates.length) return sendText(chatId,"No suitable upcoming fixtures with active low-odds 1X2/Double Chance outcomes were found for that day.",MAIN_MENU);
   const picks=[]; let product=1;
-  // SportyBet share slips accept at most 30 selections. Never send an oversized
+  // SportyBet share slips accept at most 50 selections. Never send an oversized
   // target slip to the booking endpoint.
   for(const pick of candidates) {
-    if(product>=target || picks.length>=30) break;
+    if(product>=target || picks.length>=50) break;
     picks.push(pick); product*=pick.odds;
   }
-  if(product<target) return sendText(chatId,`I found ${picks.length} eligible games, reaching ${product.toFixed(2)} combined odds. SportyBet allows at most 30 selections per booking code, so I won't send an oversized slip. Try a lower target or choose tomorrow if more fixtures are available.`,MAIN_MENU);
+  if(product<target) return sendText(chatId,`I found ${picks.length} eligible games, reaching ${product.toFixed(2)} combined odds. SportyBet allows at most 50 selections per booking code, so I won't send an oversized slip. Try a lower target or choose tomorrow if more fixtures are available.`,MAIN_MENU);
   const session=getBookingSession(chatId);
   session.fixtures=fixtures;
   session.selections=picks.map((p)=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:p.label}));
