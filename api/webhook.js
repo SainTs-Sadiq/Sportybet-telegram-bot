@@ -364,13 +364,19 @@ async function prepareDocumentSlip(chatId) {
   await sendText(chatId,"🔎 Matching the extracted picks against live SportyBet fixtures and markets. This can take a little while...");
   const sportKeys=Object.keys(SPORTS);
   const bySport=new Map();
-  for(const key of sportKeys) {
-    try {
-      const cfg=SPORTS[key];
-      const fixtures=await getFixtures({hours:720,pageSize:100,maxPages:10,sportId:cfg.sportId});
-      bySport.set(key,fixtures.filter(f=>Number(f.startMs)>Date.now()));
-    } catch(e) { console.warn("[document-picks-fixtures]",key,e.message); bySport.set(key,[]); }
-  }
+  // Fetch sports concurrently and only request a short window around tomorrow.
+  // The previous sequential 10-page fetch per sport could exceed Vercel's webhook duration.
+  const fixtureLoads=await Promise.allSettled(sportKeys.map(async key=>{
+    const cfg=SPORTS[key];
+    const fixtures=await getFixtures({hours:120,pageSize:100,maxPages:3,sportId:cfg.sportId});
+    return [key,fixtures.filter(f=>Number(f.startMs)>Date.now())];
+  }));
+  fixtureLoads.forEach((result,i)=>{
+    const key=sportKeys[i];
+    if(result.status==="fulfilled") bySport.set(result.value[0],result.value[1]);
+    else { console.warn("[document-picks-fixtures]",key,result.reason?.message||String(result.reason)); bySport.set(key,[]); }
+  });
+  console.log("[document-picks-load-summary]",JSON.stringify(Object.fromEntries([...bySport].map(([k,v])=>[k,v.length]))));
   const matched=[], issues=[];
   for(const pick of doc.selections) {
     const likelySport=SPORTS[pick.sport]?pick.sport:"football";
