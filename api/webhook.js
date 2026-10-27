@@ -273,7 +273,7 @@ async function buildTargetBooking(chatId,target,offset=0) {
 
 
 function normText(value) {
-  return String(value || "").toLowerCase().normalize("NFKD").replace(/[\\u0300-\\u036f]/g,"").replace(/[^a-z0-9]+/g," ").trim();
+  return String(value || "").toLowerCase().normalize("NFKD").replace(/[^\\x00-\\x7F]/g,"").replace(/[^a-z0-9]+/g," ").trim();
 }
 function teamMatch(a,b) {
   const x=normText(a), y=normText(b);
