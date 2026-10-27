@@ -11,11 +11,11 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "pdfkit": "^0.17.2",
-    "xlsx": "^0.18.5",
-    "openai": "^5.19.1",
     "@vercel/blob": "^2.0.0",
-    "pdf-parse": "1.1.1",
-    "tesseract.js": "^6.0.1"
+    "openai": "^5.19.1",
+    "pdfkit": "^0.17.2",
+    "tesseract.js": "^6.0.1",
+    "unpdf": "^1.7.0",
+    "xlsx": "^0.18.5"
   }
 }
