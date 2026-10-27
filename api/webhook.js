@@ -285,9 +285,11 @@ function parsePastedPicks(raw) {
     const match=cells[0], market=cells[1], selection=cells[2];
     const oddsCell=cells.slice(3).find(x=>/^\\d+(?:\\.\\d+)?$/.test(x));
     const odds=oddsCell?Number(oddsCell):null;
-    const teams=match.split(/\\s+(?:vs?\\.?|versus|@)\\s+|\\s+-\\s+/i);
-    if(teams.length<2||!market||!selection) continue;
-    rows.push({index:rows.length+1,sport:"football",homeTeam:teams[0].trim(),awayTeam:teams.slice(1).join(" vs ").trim(),match,market,selection,date:null,odds,notes:"Parsed directly from pasted text; confirm market matching."});
+    const teams=match.split(/\\s+(?:v\\.?s?\\.?|versus|@)\\s+|\\s+-\\s+/i);
+    if(!market||!selection||!match) continue;
+    const homeTeam=teams.length>1?teams[0].trim():"";
+    const awayTeam=teams.length>1?teams.slice(1).join(" vs ").trim():"";
+    rows.push({index:rows.length+1,sport:"football",homeTeam,awayTeam,match,market,selection,date:null,odds,notes:teams.length>1?"Parsed from pasted text; confirm market matching.":"Fixture separator unclear; verify before booking."});
   }
   return rows.slice(0,100);
 }
