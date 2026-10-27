@@ -5,6 +5,8 @@ import { getTeamFormAnalysis, blendFormAndMarket } from "../lib/team-history.js"
 import { marketCandidates, marketCandidatesFromOdds, marketCandidatesFromAllOdds, rankWithAI, combinedOdds } from "../lib/ai.js";
 import { SPORTS, SPORT_ORDER, sportLabel, getSport } from "../lib/sports.js";
 import { extractSelectionsFromDocument } from "../lib/document-picks.js";
+import { storeEnabled, kvGet, kvSet, kvDel } from "../lib/store.js";
+import { getFixturesCached } from "../lib/fixture-cache.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SECRET = process.env.BOT_SECRET;
@@ -167,6 +169,29 @@ function getBookingSession(chatId) {
   if (!bookingSessions.has(String(chatId))) bookingSessions.set(String(chatId), { fixtures: [], selections: [], pendingEvent: null });
   return bookingSessions.get(String(chatId));
 }
+const SESSION_TTL = 6 * 60 * 60;
+async function hydrateSessions(chatId) {
+  if (!storeEnabled) return;
+  const key = String(chatId);
+  try {
+    if (!bookingSessions.has(key)) {
+      const saved = await kvGet(`sb:booking:${key}`);
+      if (saved && typeof saved === "object") bookingSessions.set(key, saved);
+    }
+    if (!documentSessions.has(key)) {
+      const saved = await kvGet(`sb:document:${key}`);
+      if (saved && typeof saved === "object") documentSessions.set(key, saved);
+    }
+  } catch (e) { console.warn("[session-hydrate]", e?.message || String(e)); }
+}
+async function persistSessions(chatId) {
+  if (!storeEnabled) return;
+  const key = String(chatId);
+  const booking = bookingSessions.get(key);
+  if (booking) await kvSet(`sb:booking:${key}`, booking, SESSION_TTL);
+  const doc = documentSessions.get(key);
+  if (doc) await kvSet(`sb:document:${key}`, doc, SESSION_TTL);
+}
 async function startBooking(chatId) {
   await sendText(chatId, "⏳ Loading upcoming football fixtures and available markets...");
   const raw = await getFixtures({hours:168,pageSize:100,maxPages:5,sportId:SPORTS.football.sportId});
@@ -304,6 +329,15 @@ async function receivePastedPicks(chatId, raw) {
   await sendText(chatId,`🧾 PASTED PICKS — REVIEW\n\nParsed ${selections.length} selection(s) directly from your message.\n\n${lines.join("\n\n")}${more}\n\nReview these rows before matching against live SportyBet markets.`,{inline_keyboard:[[{text:"🔎 Match picks & prepare slip",callback_data:"doc_prepare"}],[{text:"🗑 Discard picks",callback_data:"doc_cancel"}],[{text:"⬅️ Main menu",callback_data:"menu"}]]});
   return true;
 }
+function teamTokens(value) {
+  return new Set(normText(value).split(" ").filter(x=>x.length>1));
+}
+function teamSim(a,b) {
+  const A=teamTokens(a),B=teamTokens(b);
+  if(!A.size||!B.size) return 0;
+  let hit=0; for(const x of A) if(B.has(x)) hit++;
+  return hit/Math.max(A.size,B.size);
+}
 function teamMatch(a,b) {
   const x=normText(a), y=normText(b);
   return Boolean(x&&y&&(x===y||x.includes(y)||y.includes(x)));
@@ -369,7 +403,7 @@ async function prepareDocumentSlip(chatId) {
   const bySport=new Map();
   const fixtureLoads=await Promise.allSettled(sportKeys.map(async key=>{
     const cfg=SPORTS[key];
-    const fixtures=await getFixtures({hours:720,pageSize:100,maxPages:20,sportId:cfg.sportId});
+    const fixtures=await getFixturesCached(getFixtures,{hours:720,pageSize:100,maxPages:20,sportId:cfg.sportId});
     return [key,fixtures.filter(f=>Number(f.startMs)>Date.now())];
   }));
   fixtureLoads.forEach((result,i)=>{
@@ -380,19 +414,9 @@ async function prepareDocumentSlip(chatId) {
   console.log("[document-picks-load-summary]",JSON.stringify({horizonHours:720,pagesPerSport:20,counts:Object.fromEntries([...bySport].map(([k,v])=>[k,v.length]))}));
   const matched=[], issues=[];
   for(const originalPick of doc.selections) {
-    // Preserve the source accumulator's explicit "12 / Either Team to Win" intent.
-    // These three rows were incorrectly shown as 1X2 Home in the review output.
+    // Preserve the source accumulator's explicit "12 / Either Team to Win" intent
+    // without hardcoding any specific fixtures.
     const pick={...originalPick};
-    const matchKey=normText(pick.match||`${pick.homeTeam||""} vs ${pick.awayTeam||""}`);
-    const eitherTeamFixtures=[
-      ["persib bandung","melbourne victory"],
-      ["campobasso fc","latina calcio"],
-      ["al jandal","damac fc"]
-    ];
-    if(eitherTeamFixtures.some(([a,b])=>matchKey.includes(a)&&matchKey.includes(b))) {
-      pick.market="12";
-      pick.selection="Either Team to Win";
-    }
     const explicit12=normText(pick.market)==="12" ||
       normText(pick.selection)==="either team to win" ||
       normText(pick.selection)==="home or away" ||
@@ -411,6 +435,21 @@ async function prepareDocumentSlip(chatId) {
       fixture=(bySport.get(sport)||[]).find(f=>teamMatch(f.homeTeam,home)&&teamMatch(f.awayTeam,away));
       if(!fixture && home && away) fixture=(bySport.get(sport)||[]).find(f=>teamMatch(f.homeTeam,away)&&teamMatch(f.awayTeam,home));
       if(fixture) break;
+    }
+    if(!fixture && home && away) {
+      // Fuzzy fallback: tip documents rename teams ("Rionegro Aguilas" vs
+      // "Aguilas Doradas Rionegro"), append Reserve/Fc suffixes, etc. Score
+      // token overlap for both home/away orders and accept a confident best.
+      let best=null,bestScore=0;
+      for(const sport of candidateSports) {
+        for(const f of (bySport.get(sport)||[])) {
+          const direct=(teamSim(home,f.homeTeam)+teamSim(away,f.awayTeam))/2;
+          const swapped=(teamSim(home,f.awayTeam)+teamSim(away,f.homeTeam))/2;
+          const sc=Math.max(direct,swapped);
+          if(sc>bestScore){bestScore=sc;best=f;}
+        }
+      }
+      if(best && bestScore>=0.6) fixture=best;
     }
     if(!fixture) { issues.push({pick,reason:"Fixture not found in upcoming SportyBet events (or team names did not match)."}); continue; }
     const marketNeed=normText(pick.market), selectionNeed=normText(pick.selection);
@@ -465,7 +504,11 @@ async function prepareDocumentSlip(chatId) {
         (selectionIsAway && ["2","away","away win"].includes(id))
       );
     });
-    if(!outcome) { issues.push({pick,reason:`Market found, but outcome "${pick.selection||"unclear"}" is unavailable or did not match.`}); continue; }
+    if(!outcome) {
+      if(explicit12 || marketIdAliases.includes(String(market.id)) && String(market.id)==="10") {
+        console.warn("[document-dc-outcome-debug]",JSON.stringify({fixture:fixture.homeTeam+" vs "+fixture.awayTeam,marketId:market.id,marketName:market.name,wanted:pick.selection,outcomes:(market.outcomes||[]).map(o=>({id:o.id,name:o.name,active:o.active,odds:o.odds}))}));
+      }
+      issues.push({pick,reason:`Market found, but outcome "${pick.selection||"unclear"}" is unavailable or did not match.`}); continue; }
     if(matched.some(x=>x.eventId===fixture.eventId)) { issues.push({pick,reason:"SportyBet booking builder currently allows one selection per event; duplicate fixture selection was skipped."}); continue; }
     if(matched.length>=50) { issues.push({pick,reason:"50-selection limit reached; remaining picks were not included."}); continue; }
     matched.push({eventId:fixture.eventId,marketId:String(market.id),specifier:String(market.specifier||""),outcomeId:String(outcome.id),odds:Number(outcome.odds),startMs:Number(fixture.startMs),label:`${fixture.homeTeam} vs ${fixture.awayTeam} — ${market.name}: ${outcome.name} @ ${Number(outcome.odds).toFixed(2)}`,key:[fixture.eventId,market.id,market.specifier||"",outcome.id].join(":")});
@@ -507,7 +550,7 @@ async function createDocumentBooking(chatId) {
 async function handleAction(chatId,action){
   if(action==="doc_prepare") return prepareDocumentSlip(chatId);
   if(action==="doc_create") return createDocumentBooking(chatId);
-  if(action==="doc_cancel"){documentSessions.delete(String(chatId));return sendText(chatId,"Uploaded picks discarded. No booking code was created.",MAIN_MENU);}
+  if(action==="doc_cancel"){documentSessions.delete(String(chatId));await kvDel(`sb:document:${String(chatId)}`);return sendText(chatId,"Uploaded picks discarded. No booking code was created.",MAIN_MENU);}
   if(action.startsWith("book_")){
     if(action==="book_start") return startBooking(chatId);
     if(action==="book_view") return viewBooking(chatId);
@@ -590,10 +633,11 @@ async function handleWebhook(req,res){
   const update=req.body||{}, msg=update.message, callback=update.callback_query, chatId=msg?.chat?.id||callback?.message?.chat?.id;
   if(!chatId) return res.status(200).json({ok:true});
   try{
-    if(callback){await answerCallback(callback.id);await handleAction(chatId,callback.data);return res.status(200).json({ok:true});}
-    if(msg.photo?.length||msg.document){await receiveDocument(chatId,msg);return res.status(200).json({ok:true});}
+    await hydrateSessions(chatId);
+    if(callback){await answerCallback(callback.id);await handleAction(chatId,callback.data);await persistSessions(chatId);return res.status(200).json({ok:true});}
+    if(msg.photo?.length||msg.document){await receiveDocument(chatId,msg);await persistSessions(chatId);return res.status(200).json({ok:true});}
     const raw=(msg.text||"").trim(), text=raw.toLowerCase(), command=text.split(/\s+/)[0];
-    if(raw && !raw.startsWith("/")) { const parsed=await receivePastedPicks(chatId,raw); if(parsed) return res.status(200).json({ok:true}); }
+    if(raw && !raw.startsWith("/")) { const parsed=await receivePastedPicks(chatId,raw); if(parsed){await persistSessions(chatId);return res.status(200).json({ok:true});} }
 
     if(command==="/book"){await startBooking(chatId);return res.status(200).json({ok:true});}
     if(command==="/start"||command==="/help"){await setBotCommands();await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
