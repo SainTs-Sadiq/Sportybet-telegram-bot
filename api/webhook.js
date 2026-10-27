@@ -36,10 +36,9 @@ const MAIN_MENU={inline_keyboard:[
   [{text:"⚽ Football — Today",callback_data:"sport_football_today"},{text:"⚽ Football — Tomorrow",callback_data:"sport_football_tomorrow"}],
   [{text:"📄 PDF — Today",callback_data:"pdf_today"},{text:"📄 PDF — Tomorrow",callback_data:"pdf_tomorrow"}],
   [{text:"📊 Excel — Today",callback_data:"excel_today"},{text:"📊 Excel — Tomorrow",callback_data:"excel_tomorrow"}],
-  [{text:"🤖 AI 10 Picks",callback_data:"ai_tomorrow_10"},{text:"🤖 AI 20 Picks",callback_data:"ai_tomorrow_20"}],
-  [{text:"🎟️ Build Booking Code",callback_data:"book_start"},{text:"🎯 Target Odds",callback_data:"book_targets"}],
   [{text:"🏆 Leagues",callback_data:"leagues"},{text:"📈 Markets",callback_data:"markets"}],
-  [{text:"🔎 Search",callback_data:"search_help"},{text:"ℹ️ Help",callback_data:"help"}]
+  [{text:"🔎 Search",callback_data:"search_help"},{text:"ℹ️ Help",callback_data:"help"}],
+  [{text:"⛔ Force stop",callback_data:"force_stop"}]
 ]};
 
 const SPORT_MENU=()=>({inline_keyboard:[
@@ -102,6 +101,40 @@ async function enrichCandidatesWithForm(fixtures,candidates,maxLeagues=30) {
   return enriched;
 }
 
+// Force stop: when set, every incoming update is ignored until it expires or
+// the user taps Resume. Guards against loop actions or repeated responses.
+const SESSION_TTL = 6 * 60 * 60;
+const STOP_KEY = "sb:force_stop";
+const STOP_TTL_SECONDS = 30 * 60;
+async function isForceStopped() {
+  try { return (await kvGet(STOP_KEY)) === true; } catch { return false; }
+}
+
+// Minimal in-memory slip store used by the document flow only
+// (upload -> match -> confirm -> code).
+function getBookingSession(chatId) {
+  if (!bookingSessions.has(String(chatId))) bookingSessions.set(String(chatId), { fixtures: [], selections: [], pendingEvent: null });
+  return bookingSessions.get(String(chatId));
+}
+
+async function persistSessions(chatId) {
+  if (!storeEnabled) return;
+  const key = String(chatId);
+  const doc = documentSessions.get(key);
+  if (doc) await kvSet(`sb:document:${key}`, doc, SESSION_TTL);
+}
+
+async function hydrateSessions(chatId) {
+  if (!storeEnabled) return;
+  const key = String(chatId);
+  try {
+    if (!documentSessions.has(key)) {
+      const saved = await kvGet(`sb:document:${key}`);
+      if (saved && typeof saved === "object") documentSessions.set(key, saved);
+    }
+  } catch (e) { console.warn("[session-hydrate]", e?.message || String(e)); }
+}
+
 async function loadDay(sport,offset){
   if(sport!=="all") return loadSportDay(sport,offset);
   const all=[];
@@ -144,161 +177,6 @@ async function runReport(chatId,action,sport="all"){
   const b=makeXlsx(fixtures,TZ);
   return sendDocument(chatId,b,`sportybet-${sport}-${offset?"tomorrow":"today"}.xlsx`,`📊 ${menuTitle(sport,offset)} • ${fixtures.length} games`);
 }
-
-async function analyzeDay(chatId,offset=1,requested=10){
-  if(!process.env.GEMINI_API_KEY && !process.env.OPENAI_API_KEY) throw new Error("AI analysis needs GEMINI_API_KEY or OPENAI_API_KEY in Vercel.");
-  const fixtures=(await loadSportDay("football",offset)).filter(f=>Number(f.startMs)>Date.now());
-  if(!fixtures.length){await sendText(chatId,"No football fixtures found for the selected day.");return;}
-  await sendText(chatId,`🤖 Analyzing ${fixtures.length} football games using SportyBet odds and our probability calculations. API-Football is not required.`);
-  let candidates=fixtures.flatMap(f=>marketCandidatesFromAllOdds(f)).filter(x=>x.odds>1&&x.modelProbability>=35);
-  candidates=await enrichCandidatesWithForm(fixtures,candidates,30);
-  candidates.sort((a,b)=>Number(b.formDataAvailable)-Number(a.formDataAvailable)||b.modelProbability-a.modelProbability||a.odds-b.odds);
-  if(!candidates.length){await sendText(chatId,"⚠️ No fixtures had usable active SportyBet markets. No picks were generated.");return;}
-  let picks;
-  try { picks=await rankWithAI(candidates.slice(0,100),Math.min(20,Math.max(1,requested))); }
-  catch(e){console.error("AI ranking failed",e);picks=candidates.slice(0,Math.min(20,Math.max(1,requested))).map((p,i)=>({...p,rank:i+1,confidence:"Low",risk:"High",rationale:"Ranked by market-normalized SportyBet probabilities; AI ranking unavailable."}));}
-  if(!picks.length){await sendText(chatId,"⚠️ No selections were returned.");return;}
-  const seenEvents=new Set();
-  picks=picks.filter(p=>{const key=String(p.eventId||p.match);if(seenEvents.has(key))return false;seenEvents.add(key);return true;}).slice(0,Math.min(20,Math.max(1,requested)));
-  const lines=picks.map((p,i)=>`${i+1}. ${p.match}\n   🎯 ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}\n   📊 Blended probability: ${p.modelProbability.toFixed(1)}% | Raw implied: ${(impliedProbability(p.odds)*100).toFixed(1)}%\n   ${p.confidence||"Low"} confidence • ${p.risk||"High"} risk\n   ${p.formDataAvailable ? `Recent form: ${p.recentForm.homeForm.form} vs ${p.recentForm.awayForm.form}; goals for/against ${p.recentForm.homeForm.goalsFor}/${p.recentForm.homeForm.goalsAgainst} vs ${p.recentForm.awayForm.goalsFor}/${p.recentForm.awayForm.goalsAgainst}.` : "Historical form unavailable; market-only estimate."} ${p.rationale||p.reason}`);
-  await sendText(chatId,`🤖 AI FOOTBALL ANALYSIS — ${offset?"TOMORROW":"TODAY"}\n\n${lines.join("\n\n")}\n\n📈 Combined odds: ${combinedOdds(picks).toFixed(2)}\n\nℹ️ When historical results match, probabilities blend a goals-based form model with SportyBet market probabilities. Smaller leagues are covered when the historical provider has results; unmatched leagues fall back to market-only. Injuries and head-to-head are not modeled.\n\n⚠️ Statistical ranking, not a guarantee.`);
-}
-
-
-function bookingKeyboard(rows) {
-  return { inline_keyboard: [...rows, [{text:"🎟️ View slip",callback_data:"book_view"},{text:"🗑 Clear slip",callback_data:"book_clear"}], [{text:"⬅️ Main menu",callback_data:"menu"}]] };
-}
-function getBookingSession(chatId) {
-  if (!bookingSessions.has(String(chatId))) bookingSessions.set(String(chatId), { fixtures: [], selections: [], pendingEvent: null });
-  return bookingSessions.get(String(chatId));
-}
-const SESSION_TTL = 6 * 60 * 60;
-async function hydrateSessions(chatId) {
-  if (!storeEnabled) return;
-  const key = String(chatId);
-  try {
-    if (!bookingSessions.has(key)) {
-      const saved = await kvGet(`sb:booking:${key}`);
-      if (saved && typeof saved === "object") bookingSessions.set(key, saved);
-    }
-    if (!documentSessions.has(key)) {
-      const saved = await kvGet(`sb:document:${key}`);
-      if (saved && typeof saved === "object") documentSessions.set(key, saved);
-    }
-  } catch (e) { console.warn("[session-hydrate]", e?.message || String(e)); }
-}
-async function persistSessions(chatId) {
-  if (!storeEnabled) return;
-  const key = String(chatId);
-  const booking = bookingSessions.get(key);
-  if (booking) await kvSet(`sb:booking:${key}`, booking, SESSION_TTL);
-  const doc = documentSessions.get(key);
-  if (doc) await kvSet(`sb:document:${key}`, doc, SESSION_TTL);
-}
-async function startBooking(chatId) {
-  await sendText(chatId, "⏳ Loading upcoming football fixtures and available markets...");
-  const raw = await getFixtures({hours:168,pageSize:100,maxPages:5,sportId:SPORTS.football.sportId});
-  const future = raw.filter(f => Number(f.startMs) > Date.now() && f.markets?.some(m => m.outcomes?.some(o => o.active && o.odds > 1)))
-    .sort((a,b)=>a.startMs-b.startMs).slice(0,12);
-  const session = getBookingSession(chatId);
-  session.fixtures = future;
-  session.pendingEvent = null;
-  if (!future.length) return sendText(chatId, "No upcoming football fixtures with active markets were returned by SportyBet. Try again later; no booking code was created.", MAIN_MENU);
-  const rows = future.map((f,i)=>[{text:`${f.homeTeam} vs ${f.awayTeam} • ${new Date(f.startMs).toLocaleString("en-GB",{timeZone:TZ,day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}`,callback_data:`book_event_${i}`}]);
-  await sendText(chatId, "🎟️ BOOKING CODE BUILDER\n\nChoose a fixture. Then choose a market and outcome. You can add multiple selections before creating the slip.", bookingKeyboard(rows));
-}
-async function chooseBookingEvent(chatId,index) {
-  const s=getBookingSession(chatId), f=s.fixtures[index];
-  if(!f) return sendText(chatId,"That fixture list has expired. Start the booking builder again.",MAIN_MENU);
-  s.pendingEvent=index;
-  const rows=(f.markets||[]).filter(m=>m.status===undefined || String(m.status)==="1" || String(m.status).toLowerCase()==="active")
-    .filter(m=>(m.outcomes||[]).some(o=>o.active && o.odds>1)).slice(0,18)
-    .map((m)=>[{text:m.name,callback_data:`book_market_${index}_${encodeURIComponent(m.id)}`}]);
-  if(!rows.length) return sendText(chatId,"No active markets were available for that fixture.",bookingKeyboard([]));
-  await sendText(chatId,`📍 ${f.homeTeam} vs ${f.awayTeam}\nChoose a market:`,bookingKeyboard(rows));
-}
-async function chooseBookingMarket(chatId,index,marketId) {
-  const s=getBookingSession(chatId), f=s.fixtures[index], m=f?.markets?.find(x=>String(x.id)===marketId);
-  if(!f||!m) return sendText(chatId,"That market is no longer available. Start the builder again.",MAIN_MENU);
-  s.pendingEvent=index;
-  const active=(m.outcomes||[]).filter(o=>o.active&&Number(o.odds)>1);
-  const rows=active.slice(0,24).map((o)=>[{text:`${o.name} @ ${Number(o.odds).toFixed(2)}`,callback_data:`book_outcome_${index}_${encodeURIComponent(m.id)}_${encodeURIComponent(m.specifier||"")}_${encodeURIComponent(o.id)}`}]);
-  if(!rows.length) return sendText(chatId,"No active outcomes are available in this market.",bookingKeyboard([]));
-  await sendText(chatId,`🎯 ${f.homeTeam} vs ${f.awayTeam}\nMarket: ${m.name}\nChoose an outcome:`,bookingKeyboard(rows));
-}
-async function addBookingOutcome(chatId,index,marketId,specifier,outcomeId) {
-  const s=getBookingSession(chatId), f=s.fixtures[index], m=f?.markets?.find(x=>String(x.id)===marketId);
-  const o=m?.outcomes?.find(x=>String(x.id)===outcomeId && String(x.specifier||m.specifier||"")===String(specifier||""));
-  if(!f||!m||!o||!o.active||!(Number(o.odds)>1)||Number(f.startMs)<=Date.now()) {
-    return sendText(chatId,"That selection is no longer valid or the event has started. Refresh the builder and choose an active outcome.",MAIN_MENU);
-  }
-  const key=[f.eventId,m.id,m.specifier||"",o.id].join(":");
-  if(s.selections.some(x=>x.key===key)) return sendText(chatId,"That selection is already in your slip.",bookingKeyboard([]));
-  if(s.selections.some(x=>x.eventId===f.eventId)) return sendText(chatId,"Only one selection per event is supported in this builder. Choose a different fixture.",bookingKeyboard([]));
-  if(s.selections.length>=50) return sendText(chatId,"Your slip has reached SportyBet's 50-selection limit.",bookingKeyboard([]));
-  s.selections.push({key,eventId:f.eventId,marketId:String(m.id),specifier:String(m.specifier||""),outcomeId:String(o.id),label:`${f.homeTeam} vs ${f.awayTeam} — ${m.name}: ${o.name} @ ${Number(o.odds).toFixed(2)}`,odds:Number(o.odds),startMs:Number(f.startMs)});
-  await sendText(chatId,`✅ Added to slip (${s.selections.length}/20)\n${s.selections[s.selections.length-1].label}\n\nContinue selecting fixtures or view your slip.`,bookingKeyboard(s.fixtures.map((x,i)=>[{text:`${x.homeTeam} vs ${x.awayTeam}`,callback_data:`book_event_${i}`}]).slice(0,12)));
-}
-async function viewBooking(chatId) {
-  const s=getBookingSession(chatId);
-  if(!s.selections.length) return sendText(chatId,"Your slip is empty. Choose Build Booking Code and select at least one outcome.",MAIN_MENU);
-  const odds=s.selections.reduce((n,x)=>n*x.odds,1);
-  const lines=s.selections.map((x,i)=>`${i+1}. ${x.label}`).join("\n");
-  await sendText(chatId,`🎟️ REVIEW YOUR SLIP\n\n${lines}\n\nSelections: ${s.selections.length}\nIndicative combined odds: ${odds.toFixed(2)}\n\nConfirm to request a booking code from SportyBet. This reserves a slip only; it does not place a bet.`,{inline_keyboard:[[{text:"✅ Generate booking code",callback_data:"book_create"}],[{text:"🗑 Clear slip",callback_data:"book_clear"},{text:"➕ Add selections",callback_data:"book_start"}],[{text:"⬅️ Main menu",callback_data:"menu"}]]});
-}
-async function createBookingForChat(chatId) {
-  const s=getBookingSession(chatId);
-  if(!s.selections.length) return sendText(chatId,"Your slip is empty.",MAIN_MENU);
-  if(s.selections.some(x=>x.startMs<=Date.now())) return sendText(chatId,"At least one selected event has started. Clear the slip and choose upcoming fixtures.",MAIN_MENU);
-  await sendText(chatId,"⏳ Requesting a real booking code from SportyBet. This request will not be automatically retried.");
-  const result=await createBooking(s.selections);
-  const unavailable=result.unavailableOutcomes.length ? `\n\n⚠️ SportyBet could not include ${result.unavailableOutcomes.length} selection(s). Please review the slip on SportyBet.` : "";
-  const expiry=result.deadline ? new Date(result.deadline).toLocaleString("en-GB",{timeZone:TZ}) : "Not provided";
-  const code=result.shareCode ? `\n\nBooking code: ${result.shareCode}` : "";
-  const url=result.shareURL ? `\nOpen slip: ${result.shareURL}` : "";
-  await sendText(chatId,`✅ SPORTYBET BOOKING CODE CREATED${code}${url}\n\nSelections requested: ${s.selections.length}\nExpiry: ${expiry}${unavailable}\n\nThis is a reserved bet slip only. No bet has been placed and no money has been staked.`,MAIN_MENU);
-}
-
-
-async function buildTargetBooking(chatId,target,offset=0) {
-  const allowed=[10,20,50,100,500,1000];
-  if(!allowed.includes(target)) return sendText(chatId,"Choose a supported target odds value.",MAIN_MENU);
-  const useBothDays=target>=100, offsets=useBothDays?[0,1]:[offset];
-  const periodLabel=useBothDays?"TODAY + TOMORROW":(offset?"TOMORROW":"TODAY");
-  if(!process.env.GEMINI_API_KEY&&!process.env.OPENAI_API_KEY) return sendText(chatId,"⚠️ Add GEMINI_API_KEY or OPENAI_API_KEY in Vercel to enable AI ranking. No slip was built.",MAIN_MENU);
-  await sendText(chatId,`🔎 Checking all available SportyBet football fixtures for ${periodLabel.toLowerCase()}. Exploring active SportyBet markets (1X2, double chance, draw no bet, goals, both teams to score, halves and corners where available) and asking Gemini to rank candidates. API-Football is not required.`);
-  const dayFixtures=await Promise.all(offsets.map(dayOffset=>loadSportDay("football",dayOffset)));
-  const fixtures=[...new Map(dayFixtures.flat().map(f=>[String(f.eventId),f])).values()].filter(f=>Number(f.startMs)>Date.now());
-  if(!fixtures.length) return sendText(chatId,`No upcoming football fixtures were found for ${periodLabel.toLowerCase()}.`,MAIN_MENU);
-  let candidates=fixtures.flatMap(f=>marketCandidatesFromAllOdds(f)).filter(p=>p.odds>1&&p.odds<=2.2&&p.eventId&&p.marketId&&p.outcomeId);
-  candidates=await enrichCandidatesWithForm(fixtures,candidates,35);
-  candidates=candidates.filter(p=>p.modelProbability>=50).sort((a,b)=>Number(b.formDataAvailable)-Number(a.formDataAvailable)||b.modelProbability-a.modelProbability||a.odds-b.odds);
-  const bestByEvent=new Map();
-  for(const p of candidates){const old=bestByEvent.get(String(p.eventId));if(!old||p.modelProbability>old.modelProbability)bestByEvent.set(String(p.eventId),p);}
-  let ranked=[...bestByEvent.values()];
-  if(!ranked.length) return sendText(chatId,"⚠️ No active SportyBet 1X2 selections met the filters (market-normalized probability ≥50%, odds ≤2.20). I won't add unsupported picks to force the target.",MAIN_MENU);
-  try {
-    const aiRanked=await rankWithAI(ranked.map((p,i)=>({id:i+1,match:p.match,market:p.market,selection:p.selection,odds:p.odds,modelProbability:p.modelProbability,marketProbability:p.marketProbability,formDataAvailable:p.formDataAvailable,formSummary:p.recentForm?{home:p.recentForm.homeForm,away:p.recentForm.awayForm}:null,expectedGoals:p.recentForm?{home:p.recentForm.expectedGoalsHome,away:p.recentForm.expectedGoalsAway}:null,dataQuality:p.dataQuality,league:p.league,startMs:p.startMs,reason:p.reason})),ranked.length);
-    const order=new Map(aiRanked.map((p,i)=>[Number(p.id),Number(p.rank)||i+1]));
-    if(aiRanked.length) ranked=ranked.map((p,i)=>({...p,aiRank:order.get(i+1)??999,aiMeta:aiRanked.find(x=>Number(x.id)===i+1)})).sort((a,b)=>a.aiRank-b.aiRank);
-  } catch(e){console.error("AI target-slip ranking failed; using statistical ranking",e);}
-  const picks=[];let product=1;
-  for(const pick of ranked){if(product>=target||picks.length>=50)break;picks.push(pick);product*=pick.odds;}
-  if(product<target) return sendText(chatId,`⚠️ I found ${ranked.length} qualifying fixtures across ${periodLabel.toLowerCase()}. Their combined odds are ${product.toFixed(2)} (max 50 selections), below your ${target} target. I won't lower the filters or invent stronger probabilities to force the target. Try a lower target or retry when more fixtures are available.`,MAIN_MENU);
-  const session=getBookingSession(chatId);session.fixtures=fixtures;
-  session.selections=picks.map(p=>({...p,key:[p.eventId,p.marketId,p.specifier,p.outcomeId].join(":"),label:`${p.match} — ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}`}));
-  const estimatedAllWin=picks.reduce((n,p)=>n*(Math.max(0,Math.min(100,p.modelProbability))/100),1)*100;
-  const lines=picks.map((p,i)=>`${i+1}. ${p.match}\n   🎯 ${p.market}: ${p.selection} @ ${Number(p.odds).toFixed(2)}\n   📊 Normalized market probability: ${p.modelProbability.toFixed(1)}%\n   🏆 ${p.league||"League not provided"}`);
-  await sendText(chatId,`🎯 STATS-FILTERED TARGET SLIP — ${periodLabel}\n\nRequested target: ${target}\nBuilt combined odds: ${product.toFixed(2)}\nSelections: ${picks.length}/50\nMethod: explore active SportyBet markets including 1X2, double chance, draw no bet, totals, both teams to score, halves and corners where available. Historical form is applied where the outcome can be mapped reliably; other markets use normalized prices. Gemini ranks candidates. One selection per event.\n\n${lines.join("\n\n")}\n\n📉 Product of normalized market probabilities: ${estimatedAllWin.toFixed(3)}% (rough illustration only, not a calibrated accumulator probability).\n\n⚠️ High combined odds still mean a low chance of every leg winning. Automatically requesting the booking code now.`);
-  try {
-    const result=await createBooking(session.selections), expiry=result.deadline?new Date(result.deadline).toLocaleString("en-GB",{timeZone:TZ}):"Not provided";
-    const code=result.shareCode?`\n\nBooking code: ${result.shareCode}`:"", url=result.shareURL?`\nOpen slip: ${result.shareURL}`:"";
-    const unavailable=result.unavailableOutcomes?.length?`\n\n⚠️ SportyBet could not include ${result.unavailableOutcomes.length} selection(s). Review the slip on SportyBet.`:"";
-    await sendText(chatId,`✅ SPORTYBET BOOKING CODE CREATED${code}${url}\n\nSelections requested: ${session.selections.length}\nExpiry: ${expiry}${unavailable}\n\nThis is a shareable slip only. No bet has been placed and no money has been staked.`,MAIN_MENU);
-  } catch(e){console.error("Automatic booking-code creation failed",e);await sendText(chatId,`⚠️ The slip was built, but SportyBet did not return a booking code: ${e.message||"request failed"}. Your selections remain in this chat session; tap View slip to review.`,bookingKeyboard([]));}
-}
-
-
 
 function normText(value) {
   return String(value || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g," ").trim();
@@ -553,33 +431,9 @@ async function createDocumentBooking(chatId) {
 async function handleAction(chatId,action){
   if(action==="doc_prepare") return prepareDocumentSlip(chatId);
   if(action==="doc_create") return createDocumentBooking(chatId);
+  if(action==="force_stop"){await kvSet(STOP_KEY,true,STOP_TTL_SECONDS);return sendText(chatId,"⛔ Bot paused for 30 minutes. No commands or buttons will be answered. Tap Resume or send /start to unpause early.",null);}
+  if(action==="force_resume"){await kvDel(STOP_KEY);return sendText(chatId,"▶️ Bot resumed.",MAIN_MENU);}
   if(action==="doc_cancel"){documentSessions.delete(String(chatId));await kvDel(`sb:document:${String(chatId)}`);return sendText(chatId,"Uploaded picks discarded. No booking code was created.",MAIN_MENU);}
-  if(action.startsWith("book_")){
-    if(action==="book_start") return startBooking(chatId);
-    if(action==="book_view") return viewBooking(chatId);
-    if(action==="book_clear"){bookingSessions.set(String(chatId),{fixtures:[],selections:[],pendingEvent:null});return sendText(chatId,"Your booking slip has been cleared.",MAIN_MENU);}
-    if(action==="book_create") return createBookingForChat(chatId);
-    if(action.startsWith("book_event_")) return chooseBookingEvent(chatId,Number(action.slice("book_event_".length)));
-    if(action.startsWith("book_market_")){
-      const match=action.match(/^book_market_(\d+)_(.+)$/);
-      if(!match) return sendText(chatId,"Invalid market selection. Start the builder again.",MAIN_MENU);
-      return chooseBookingMarket(chatId,Number(match[1]),decodeURIComponent(match[2]));
-    }
-    if(action.startsWith("book_outcome_")){
-      const match=action.match(/^book_outcome_(\d+)_([^_]+)_([^_]*)_(.+)$/);
-      if(!match) return sendText(chatId,"Invalid outcome selection. Start the builder again.",MAIN_MENU);
-      return addBookingOutcome(chatId,Number(match[1]),decodeURIComponent(match[2]),decodeURIComponent(match[3]),decodeURIComponent(match[4]));
-    }
-    if(action==="book_targets") return sendText(chatId,"Choose your target odds. For 100, 500 and 1,000 odds, use the combined option to pool eligible fixtures from today and tomorrow:",{inline_keyboard:[
-      [10,20,50].map(n=>({text:`${n} odds today`,callback_data:`book_target_${n}`})),
-      [10,20,50].map(n=>({text:`${n} odds tomorrow`,callback_data:`book_target_tomorrow_${n}`})),
-      [100,500,1000].map(n=>({text:`${n} odds • TODAY + TOMORROW`,callback_data:`book_target_both_${n}`})),
-      [{text:"⬅️ Main menu",callback_data:"menu"}]
-    ]});
-    if(action.startsWith("book_target_both_")) return buildTargetBooking(chatId,Number(action.slice("book_target_both_".length)),0);
-    if(action.startsWith("book_target_tomorrow_")) return buildTargetBooking(chatId,Number(action.slice("book_target_tomorrow_".length)),1);
-    if(action.startsWith("book_target_")) return buildTargetBooking(chatId,Number(action.slice("book_target_".length)),0);
-  }
   if(action==="menu") return sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);
   if(action==="help"||action==="search_help"){
     return sendText(chatId,action==="search_help"
@@ -592,7 +446,6 @@ async function handleAction(chatId,action){
     const body=[...counts.entries()].sort((a,b)=>b[1]-a[1]).slice(0,50).map(([n,c],i)=>`${i+1}. ${n} — ${c}`).join("\n")||"No data found.";
     return sendText(chatId,`${action==="leagues"?"🏆":"📈"} Tomorrow's ${action}\n\n${body}`,MAIN_MENU);
   }
-  if(action.startsWith("ai_tomorrow_")) return analyzeDay(chatId,1,Number(action.split("_").pop())||10);
   if(action.startsWith("sport_")){
     const [,sport,day]=action.split("_"); return runReport(chatId,day==="tomorrow"?"summary_tomorrow":"summary_today",sport);
   }
@@ -619,8 +472,6 @@ async function setBotCommands(){
     {command:"leagues",description:"List tomorrow's leagues"},
     {command:"markets",description:"List tomorrow's markets"},
     {command:"search",description:"Search fixtures"},
-    {command:"analyze",description:"AI football analysis"},
-    {command:"book",description:"Build a SportyBet booking code"},
     {command:"help",description:"Help"}
   ];
   try{await tg("setMyCommands",{commands})}catch(e){console.error(e)}
@@ -632,14 +483,17 @@ async function handleWebhook(req,res){
   const update=req.body||{}, msg=update.message, callback=update.callback_query, chatId=msg?.chat?.id||callback?.message?.chat?.id;
   if(!chatId) return res.status(200).json({ok:true});
   try{
+    if(await isForceStopped()) {
+      if(callback&&callback.data==="force_resume"){await answerCallback(callback.id);await kvDel(STOP_KEY);await sendText(chatId,"▶️ Bot resumed.",MAIN_MENU);return res.status(200).json({ok:true});}
+      return res.status(200).json({ok:true});
+    }
     await hydrateSessions(chatId);
     if(callback){await answerCallback(callback.id);await handleAction(chatId,callback.data);await persistSessions(chatId);return res.status(200).json({ok:true});}
     if(msg.photo?.length||msg.document){await receiveDocument(chatId,msg);await persistSessions(chatId);return res.status(200).json({ok:true});}
     const raw=(msg.text||"").trim(), text=raw.toLowerCase(), command=text.split(/\s+/)[0];
     if(raw && !raw.startsWith("/")) { const parsed=await receivePastedPicks(chatId,raw); if(parsed){await persistSessions(chatId);return res.status(200).json({ok:true});} }
 
-    if(command==="/book"){await startBooking(chatId);return res.status(200).json({ok:true});}
-    if(command==="/start"||command==="/help"){await setBotCommands();await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
+    if(command==="/start"||command==="/help"){await setBotCommands();await kvDel(STOP_KEY);await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
     if(command==="/fixtures"||command==="/football"){
       const sport=command==="/fixtures"?"all":command.slice(1);
       await sendText(chatId,sport==="all"?"📋 Choose sport and date:":`${sportLabel(sport)}\n\nChoose date:`,SPORT_MENU());return res.status(200).json({ok:true});
@@ -647,7 +501,6 @@ async function handleWebhook(req,res){
     if(command==="/today"||command==="/tomorrow"){await runReport(chatId,command,"all");return res.status(200).json({ok:true});}
     if(command==="/pdf"||command==="/pdf_tomorrow"||command==="/excel"||command==="/excel_tomorrow"){await runReport(chatId,command.slice(1),"all");return res.status(200).json({ok:true});}
     if(command==="/leagues"||command==="/markets"){await handleAction(chatId,command.slice(1));return res.status(200).json({ok:true});}
-    if(command==="/analyze"){const p=text.split(/\s+/),when=p[1]==="today"?0:1,n=Math.min(20,Math.max(1,Number(p[2])||10));await analyzeDay(chatId,when,n);return res.status(200).json({ok:true});}
     if(command==="/search"){
       const q=raw.slice(command.length).trim().toLowerCase(); if(!q){await sendText(chatId,"Usage: /search Arsenal",MAIN_MENU);return res.status(200).json({ok:true});}
       const fixtures=await loadDay("all",1), matches=fixtures.filter(f=>`${f.homeTeam} ${f.awayTeam} ${f.league}`.toLowerCase().includes(q));
