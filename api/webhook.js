@@ -418,9 +418,11 @@ async function prepareDocumentSlip(chatId) {
       selectionNeed==="draw" ? ["x","draw"] :
       selectionNeed==="yes" ? ["yes","gg","both teams to score yes"] :
       selectionNeed==="no" ? ["no","ng","both teams to score no"] :
+      selectionNeed==="either team to win" || selectionNeed==="12" ? ["12","1 or 2","home or away","home away","no draw"] :
       selectionNeed==="over 1 5 goals" ? ["over 1.5","over 1 5","over 1 5 goals"] :
       selectionNeed==="over 2 5 goals" ? ["over 2.5","over 2 5","over 2 5 goals"] :
       selectionNeed==="under 3 5 goals" ? ["under 3.5","under 3 5","under 3 5 goals"] : [selectionNeed];
+    const normalizedOutcomeAliases=outcomeAliases.map(normText);
     const selectionIsHome = normText(pick.selection)===normText(fixture.homeTeam) || normText(pick.selection).includes(normText(fixture.homeTeam)) || normText(fixture.homeTeam).includes(normText(pick.selection));
     const selectionIsAway = normText(pick.selection)===normText(fixture.awayTeam) || normText(pick.selection).includes(normText(fixture.awayTeam)) || normText(fixture.awayTeam).includes(normText(pick.selection));
     const expandedOutcomeAliases = [...outcomeAliases];
@@ -429,8 +431,8 @@ async function prepareDocumentSlip(chatId) {
     const outcome=(market.outcomes||[]).find(o=>{
       const n=normText(o.name);
       const id=String(o.id).toLowerCase();
-      return o.active&&Number(o.odds)>1&&(
-        expandedOutcomeAliases.some(alias=>n===alias||n.includes(alias)||alias.includes(n)) ||
+      return (o.active===true || o.active===undefined || o.active===null) && Number(o.odds)>1&&(
+        [...expandedOutcomeAliases.map(normText),...normalizedOutcomeAliases].some(alias=>alias && (n===alias||n.includes(alias)||alias.includes(n))) ||
         (selectionIsHome && ["1","home","home win"].includes(id)) ||
         (selectionIsAway && ["2","away","away win"].includes(id))
       );
