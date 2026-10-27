@@ -387,9 +387,31 @@ async function prepareDocumentSlip(chatId) {
     if(!fixture) { issues.push({pick,reason:"Fixture not found in upcoming SportyBet events (or team names did not match)."}); continue; }
     const marketNeed=normText(pick.market), selectionNeed=normText(pick.selection);
     const markets=(fixture.markets||[]).filter(m=>m.status===undefined||String(m.status)==="1"||String(m.status).toLowerCase()==="active");
-    const market=markets.find(m=>marketNeed&&(normText(m.name)===marketNeed||normText(m.desc)===marketNeed||normText(m.name).includes(marketNeed)||marketNeed.includes(normText(m.name))));
+    const marketAliases = ({
+      "1x2":["1x2","match result","full time result","1x2 full time"],
+      "12":["double chance","1x2","match result"],
+      "either team to win":["double chance","1x2"],
+      "over under":["over under","over under goals","total goals"],
+      "both teams to score":["gg ng","both teams to score","btts"],
+      "double chance":["double chance"]
+    })[marketNeed] || [marketNeed];
+    const market=markets.find(m=>{
+      const names=[normText(m.name),normText(m.desc)].filter(Boolean);
+      return marketAliases.some(alias=>names.some(n=>n===alias||n.includes(alias)||alias.includes(n)));
+    });
     if(!market) { issues.push({pick,reason:`Fixture found, but market "${pick.market||"unclear"}" was not matched confidently.`}); continue; }
-    const outcome=(market.outcomes||[]).find(o=>o.active&&Number(o.odds)>1&&selectionNeed&&(normText(o.name)===selectionNeed||normText(o.name).includes(selectionNeed)||selectionNeed.includes(normText(o.name))));
+    const outcomeAliases = selectionNeed==="home"||selectionNeed==="home win" ? ["1","home","home win"] :
+      selectionNeed==="away"||selectionNeed==="away win" ? ["2","away","away win"] :
+      selectionNeed==="draw" ? ["x","draw"] :
+      selectionNeed==="yes" ? ["yes","gg","both teams to score yes"] :
+      selectionNeed==="no" ? ["no","ng","both teams to score no"] :
+      selectionNeed==="over 1 5 goals" ? ["over 1.5","over 1 5","over 1 5 goals"] :
+      selectionNeed==="over 2 5 goals" ? ["over 2.5","over 2 5","over 2 5 goals"] :
+      selectionNeed==="under 3 5 goals" ? ["under 3.5","under 3 5","under 3 5 goals"] : [selectionNeed];
+    const outcome=(market.outcomes||[]).find(o=>{
+      const n=normText(o.name);
+      return o.active&&Number(o.odds)>1&&outcomeAliases.some(alias=>n===alias||n.includes(alias)||alias.includes(n));
+    });
     if(!outcome) { issues.push({pick,reason:`Market found, but outcome "${pick.selection||"unclear"}" is unavailable or did not match.`}); continue; }
     if(matched.some(x=>x.eventId===fixture.eventId)) { issues.push({pick,reason:"SportyBet booking builder currently allows one selection per event; duplicate fixture selection was skipped."}); continue; }
     if(matched.length>=50) { issues.push({pick,reason:"50-selection limit reached; remaining picks were not included."}); continue; }
