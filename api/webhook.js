@@ -5,8 +5,9 @@ import { getTeamFormAnalysis, blendFormAndMarket } from "../lib/team-history.js"
 import { marketCandidates, marketCandidatesFromOdds, marketCandidatesFromAllOdds, rankWithAI, combinedOdds } from "../lib/ai.js";
 import { SPORTS, SPORT_ORDER, sportLabel, getSport } from "../lib/sports.js";
 import { extractSelectionsFromDocument } from "../lib/document-picks.js";
-import { storeEnabled, kvGet, kvSet, kvDel } from "../lib/store.js";
+import { storeEnabled, kvGet, kvSet, kvSetNx, kvDel } from "../lib/store.js";
 import { getFixturesCached } from "../lib/fixture-cache.js";
+import { waitUntil } from "@vercel/functions";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SECRET = process.env.BOT_SECRET;
@@ -513,7 +514,15 @@ async function handleWebhook(req,res){
 
 export async function handler(req,res){
   if(req.method!=="POST") return res.status(200).json({ok:true,service:"sportybet-telegram-bot"});
-  return handleWebhook(req,res);
+  const updateId=String(req.body?.update_id||"");
+  if(updateId) {
+    const fresh=await kvSetNx(`sb:upd:${updateId}`,true,600);
+    if(fresh===false) return res.status(200).json({ok:true,duplicate:true});
+  }
+  // Acknowledge instantly so Telegram never retries, then keep processing in
+  // the background within the same function invocation.
+  res.status(200).json({ok:true});
+  return waitUntil(handleWebhook(req,res));
 }
 
 export default handler;
