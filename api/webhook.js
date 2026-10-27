@@ -395,9 +395,17 @@ async function prepareDocumentSlip(chatId) {
       "both teams to score":["gg ng","both teams to score","btts"],
       "double chance":["double chance"]
     })[marketNeed] || [marketNeed];
+    const marketIdAliases = ({
+      "1x2":["1"], "match result":["1"], "full time result":["1"],
+      "double chance":["10"], "12":["10"],
+      "draw no bet":["11"], "over under":["18"], "over under goals":["18"],
+      "both teams to score":["29"], "gg ng":["29"],
+      "odd even":["26"], "handicap":["14"]
+    })[marketNeed] || [];
     const market=markets.find(m=>{
       const names=[normText(m.name),normText(m.desc)].filter(Boolean);
-      return marketAliases.some(alias=>names.some(n=>n===alias||n.includes(alias)||alias.includes(n)));
+      return marketAliases.some(alias=>names.some(n=>n===alias||n.includes(alias)||alias.includes(n))) ||
+        marketIdAliases.includes(String(m.id));
     });
     if(!market) { issues.push({pick,reason:`Fixture found, but market "${pick.market||"unclear"}" was not matched confidently.`}); continue; }
     const outcomeAliases = selectionNeed==="home"||selectionNeed==="home win" ? ["1","home","home win"] :
@@ -408,9 +416,19 @@ async function prepareDocumentSlip(chatId) {
       selectionNeed==="over 1 5 goals" ? ["over 1.5","over 1 5","over 1 5 goals"] :
       selectionNeed==="over 2 5 goals" ? ["over 2.5","over 2 5","over 2 5 goals"] :
       selectionNeed==="under 3 5 goals" ? ["under 3.5","under 3 5","under 3 5 goals"] : [selectionNeed];
+    const selectionIsHome = normText(pick.selection)===normText(fixture.homeTeam) || normText(pick.selection).includes(normText(fixture.homeTeam)) || normText(fixture.homeTeam).includes(normText(pick.selection));
+    const selectionIsAway = normText(pick.selection)===normText(fixture.awayTeam) || normText(pick.selection).includes(normText(fixture.awayTeam)) || normText(fixture.awayTeam).includes(normText(pick.selection));
+    const expandedOutcomeAliases = [...outcomeAliases];
+    if(selectionIsHome) expandedOutcomeAliases.push("1","home","home win");
+    if(selectionIsAway) expandedOutcomeAliases.push("2","away","away win");
     const outcome=(market.outcomes||[]).find(o=>{
       const n=normText(o.name);
-      return o.active&&Number(o.odds)>1&&outcomeAliases.some(alias=>n===alias||n.includes(alias)||alias.includes(n));
+      const id=String(o.id).toLowerCase();
+      return o.active&&Number(o.odds)>1&&(
+        expandedOutcomeAliases.some(alias=>n===alias||n.includes(alias)||alias.includes(n)) ||
+        (selectionIsHome && ["1","home","home win"].includes(id)) ||
+        (selectionIsAway && ["2","away","away win"].includes(id))
+      );
     });
     if(!outcome) { issues.push({pick,reason:`Market found, but outcome "${pick.selection||"unclear"}" is unavailable or did not match.`}); continue; }
     if(matched.some(x=>x.eventId===fixture.eventId)) { issues.push({pick,reason:"SportyBet booking builder currently allows one selection per event; duplicate fixture selection was skipped."}); continue; }
