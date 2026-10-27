@@ -4,6 +4,7 @@ import { impliedProbability } from "../lib/football.js";
 import { getTeamFormAnalysis, blendFormAndMarket } from "../lib/team-history.js";
 import { marketCandidates, marketCandidatesFromOdds, marketCandidatesFromAllOdds, rankWithAI, combinedOdds } from "../lib/ai.js";
 import { SPORTS, SPORT_ORDER, sportLabel, getSport } from "../lib/sports.js";
+import { extractSelectionsFromDocument } from "../lib/document-picks.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SECRET = process.env.BOT_SECRET;
@@ -11,6 +12,7 @@ const TZ = process.env.REPORT_TIMEZONE || "Africa/Lagos";
 
 const cache = new Map();
 const bookingSessions = new Map();
+const documentSessions = new Map();
 const cacheKey = (sport, day) => `${sport}:${day}`;
 
 async function tg(method, body) {
@@ -269,7 +271,139 @@ async function buildTargetBooking(chatId,target,offset=0) {
 }
 
 
+
+function normText(value) {
+  return String(value || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g," ").trim();
+}
+function teamMatch(a,b) {
+  const x=normText(a), y=normText(b);
+  return Boolean(x&&y&&(x===y||x.includes(y)||y.includes(x)));
+}
+async function downloadTelegramFile(fileId) {
+  const metaRes=await fetch(`https://api.telegram.org/bot${TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`);
+  const meta=await metaRes.json();
+  if(!metaRes.ok||!meta.ok||!meta.result?.file_path) throw new Error("Telegram could not retrieve that upload. Please send it again.");
+  const fileRes=await fetch(`https://api.telegram.org/file/bot${TOKEN}/${meta.result.file_path}`,{signal:AbortSignal.timeout(25000)});
+  if(!fileRes.ok) throw new Error("Unable to download the uploaded file from Telegram.");
+  const arr=await fileRes.arrayBuffer();
+  if(arr.byteLength>18*1024*1024) throw new Error("File is too large. Please send a file under 18 MB.");
+  return Buffer.from(arr);
+}
+async function receiveDocument(chatId,msg) {
+  let fileId, mimeType, name;
+  if(msg.photo?.length) {
+    fileId=msg.photo[msg.photo.length-1].file_id; mimeType="image/jpeg"; name="telegram-photo.jpg";
+  } else if(msg.document) {
+    fileId=msg.document.file_id; mimeType=String(msg.document.mime_type||"").toLowerCase(); name=msg.document.file_name||"upload";
+    if(mimeType==="application/octet-stream"||!mimeType) {
+      const ext=name.toLowerCase().split(".").pop();
+      mimeType=ext==="pdf"?"application/pdf":(["jpg","jpeg"].includes(ext)?"image/jpeg":ext==="png"?"image/png":ext==="webp"?"image/webp":"");
+    }
+  } else return false;
+  if(!["image/jpeg","image/png","image/webp","application/pdf"].includes(mimeType)) {
+    await sendText(chatId,"Please upload a screenshot (JPG, PNG or WEBP) or a PDF containing your picks.");
+    return true;
+  }
+  await sendText(chatId,`📥 Received ${name}. Reading the fixtures, markets and selected outcomes now...`);
+  const buffer=await downloadTelegramFile(fileId);
+  const extracted=await extractSelectionsFromDocument(buffer,mimeType);
+  if(!extracted.selections.length) {
+    await sendText(chatId,"I couldn't identify any clear selections in that file. Try a sharper screenshot or a PDF with the picks and markets visible.");
+    return true;
+  }
+  const session={...extracted,createdAt:Date.now(),filename:name};
+  documentSessions.set(String(chatId),session);
+  const lines=extracted.selections.slice(0,35).map(p=>`${p.index}. ${p.match||`${p.homeTeam} vs ${p.awayTeam}`}
+   🎯 ${p.market||"Market unclear"}: ${p.selection||"Selection unclear"}${p.odds?` @ ${p.odds}`:""}${p.notes?`\n   ⚠️ ${p.notes}`:""}`);
+  const more=extracted.selections.length>35?`\n...and ${extracted.selections.length-35} more selections.`:"";
+  await sendText(chatId,`🧾 EXTRACTED PICKS — REVIEW BEFORE BOOKING
+
+Found ${extracted.selections.length} selection(s) in ${name}.
+
+${lines.join("\n\n")}${more}
+
+Please review the extracted text. When you continue, I will match each pick against live SportyBet fixtures and markets. Anything uncertain or unavailable will be flagged; it won't be silently substituted.`,{inline_keyboard:[
+    [{text:"🔎 Match picks & prepare slip",callback_data:"doc_prepare"}],
+    [{text:"🗑 Discard upload",callback_data:"doc_cancel"}],
+    [{text:"⬅️ Main menu",callback_data:"menu"}]
+  ]});
+  return true;
+}
+async function prepareDocumentSlip(chatId) {
+  const doc=documentSessions.get(String(chatId));
+  if(!doc) return sendText(chatId,"No uploaded document is waiting. Send a screenshot or PDF first.",MAIN_MENU);
+  await sendText(chatId,"🔎 Matching the extracted picks against live SportyBet fixtures and markets. This can take a little while...");
+  const sportKeys=Object.keys(SPORTS);
+  const bySport=new Map();
+  for(const key of sportKeys) {
+    try {
+      const cfg=SPORTS[key];
+      const fixtures=await getFixtures({hours:720,pageSize:100,maxPages:10,sportId:cfg.sportId});
+      bySport.set(key,fixtures.filter(f=>Number(f.startMs)>Date.now()));
+    } catch(e) { console.warn("[document-picks-fixtures]",key,e.message); bySport.set(key,[]); }
+  }
+  const matched=[], issues=[];
+  for(const pick of doc.selections) {
+    const likelySport=SPORTS[pick.sport]?pick.sport:"football";
+    const candidateSports=likelySport==="other"?sportKeys:[likelySport,...sportKeys.filter(s=>s!==likelySport)];
+    const parts=String(pick.match||"").split(/\s+vs\s+/i);
+    const home=pick.homeTeam || (parts.length>1?parts[0]:"");
+    const away=pick.awayTeam || (parts.length>1?parts.slice(1).join(" vs "):"");
+    let fixture=null;
+    for(const sport of candidateSports) {
+      fixture=(bySport.get(sport)||[]).find(f=>teamMatch(f.homeTeam,home)&&teamMatch(f.awayTeam,away));
+      if(!fixture && home && away) fixture=(bySport.get(sport)||[]).find(f=>teamMatch(f.homeTeam,away)&&teamMatch(f.awayTeam,home));
+      if(fixture) break;
+    }
+    if(!fixture) { issues.push({pick,reason:"Fixture not found in upcoming SportyBet events (or team names did not match)."}); continue; }
+    const marketNeed=normText(pick.market), selectionNeed=normText(pick.selection);
+    const markets=(fixture.markets||[]).filter(m=>m.status===undefined||String(m.status)==="1"||String(m.status).toLowerCase()==="active");
+    const market=markets.find(m=>marketNeed&&(normText(m.name)===marketNeed||normText(m.desc)===marketNeed||normText(m.name).includes(marketNeed)||marketNeed.includes(normText(m.name))));
+    if(!market) { issues.push({pick,reason:`Fixture found, but market "${pick.market||"unclear"}" was not matched confidently.`}); continue; }
+    const outcome=(market.outcomes||[]).find(o=>o.active&&Number(o.odds)>1&&selectionNeed&&(normText(o.name)===selectionNeed||normText(o.name).includes(selectionNeed)||selectionNeed.includes(normText(o.name))));
+    if(!outcome) { issues.push({pick,reason:`Market found, but outcome "${pick.selection||"unclear"}" is unavailable or did not match.`}); continue; }
+    if(matched.some(x=>x.eventId===fixture.eventId)) { issues.push({pick,reason:"SportyBet booking builder currently allows one selection per event; duplicate fixture selection was skipped."}); continue; }
+    if(matched.length>=50) { issues.push({pick,reason:"50-selection limit reached; remaining picks were not included."}); continue; }
+    matched.push({eventId:fixture.eventId,marketId:String(market.id),specifier:String(market.specifier||""),outcomeId:String(outcome.id),odds:Number(outcome.odds),startMs:Number(fixture.startMs),label:`${fixture.homeTeam} vs ${fixture.awayTeam} — ${market.name}: ${outcome.name} @ ${Number(outcome.odds).toFixed(2)}`,key:[fixture.eventId,market.id,market.specifier||"",outcome.id].join(":")});
+  }
+  if(!matched.length) {
+    const details=issues.slice(0,12).map((x,i)=>`${i+1}. ${x.pick.match||x.pick.selection}: ${x.reason}`).join("\n");
+    return sendText(chatId,`⚠️ I couldn't confidently match any selections to active SportyBet markets, so no booking code was requested.\n\n${details||"Please upload a clearer document."}`,MAIN_MENU);
+  }
+  const s=getBookingSession(chatId); s.selections=matched; s.fixtures=[];
+  const totalOdds=matched.reduce((n,x)=>n*x.odds,1);
+  const good=matched.map((x,i)=>`${i+1}. ${x.label}`).join("\n");
+  const bad=issues.length?`\n\n⚠️ Not included (${issues.length}):\n${issues.slice(0,12).map((x,i)=>`${i+1}. ${x.pick.match||x.pick.selection}: ${x.reason}`).join("\n")}${issues.length>12?"\nMore unmatched selections omitted from this message.":""}`:"";
+  await sendText(chatId,`🎟️ SPORTYBET SLIP READY FOR CONFIRMATION
+
+Matched: ${matched.length}
+Unmatched/ambiguous: ${issues.length}
+Indicative combined odds: ${Number.isFinite(totalOdds)?totalOdds.toFixed(2):"too large to display"}
+
+${good}${bad}
+
+Only the matched selections above will be submitted to SportyBet for a shareable booking code. Review before confirming.`,{inline_keyboard:[
+    [{text:`✅ Generate code for ${matched.length} picks`,callback_data:"doc_create"}],
+    [{text:"🗑 Cancel",callback_data:"doc_cancel"},{text:"⬅️ Main menu",callback_data:"menu"}]
+  ]});
+}
+async function createDocumentBooking(chatId) {
+  const s=getBookingSession(chatId);
+  if(!s.selections.length) return sendText(chatId,"No matched selections are ready to book.",MAIN_MENU);
+  if(s.selections.some(x=>Number(x.startMs)<=Date.now())) return sendText(chatId,"At least one selected event has started. Upload again or remove the expired selection before generating a code.",MAIN_MENU);
+  await sendText(chatId,"⏳ Requesting a real SportyBet share code. This does not place a bet and will not be automatically retried.");
+  const result=await createBooking(s.selections);
+  const expiry=result.deadline?new Date(result.deadline).toLocaleString("en-GB",{timeZone:TZ}):"Not provided";
+  const code=result.shareCode?`\n\nBooking code: ${result.shareCode}`:"";
+  const url=result.shareURL?`\nOpen slip: ${result.shareURL}`:"";
+  const unavailable=result.unavailableOutcomes?.length?`\n\n⚠️ SportyBet could not include ${result.unavailableOutcomes.length} selection(s). Check the final slip before using it.`:"";
+  await sendText(chatId,`✅ SPORTYBET BOOKING CODE CREATED${code}${url}\n\nSelections requested: ${s.selections.length}\nExpiry: ${expiry}${unavailable}\n\nThis creates a shareable slip only; no wager has been placed and no money has been staked.`,MAIN_MENU);
+}
+
 async function handleAction(chatId,action){
+  if(action==="doc_prepare") return prepareDocumentSlip(chatId);
+  if(action==="doc_create") return createDocumentBooking(chatId);
+  if(action==="doc_cancel"){documentSessions.delete(String(chatId));return sendText(chatId,"Uploaded picks discarded. No booking code was created.",MAIN_MENU);}
   if(action.startsWith("book_")){
     if(action==="book_start") return startBooking(chatId);
     if(action==="book_view") return viewBooking(chatId);
@@ -300,7 +434,7 @@ async function handleAction(chatId,action){
   if(action==="help"||action==="search_help"){
     return sendText(chatId,action==="search_help"
       ?"🔎 Search\n\nUse /search Arsenal or /search NBA. Search is currently against tomorrow's all-sport fixture list."
-      :"⚽🏀🎾 SportyBet Markets Bot\n\n/fixtures — choose Football, Basketball, Tennis or All Sports\n/today — all sports today\n/tomorrow — all sports tomorrow\n/pdf — all sports today\n/pdf_tomorrow — all sports tomorrow\n/excel — all sports today\n/excel_tomorrow — all sports tomorrow\n/football, /basketball, /tennis — sport menus\n/search TEAM — search tomorrow's all-sport fixtures\n\n🤖 /analyze tomorrow 10 — football AI analysis for now.\n🎟️ /book — build a SportyBet booking code from available upcoming football markets.",MAIN_MENU);
+      :"⚽🏀🎾 SportyBet Markets Bot\n\n/fixtures — choose Football, Basketball, Tennis or All Sports\n/today — all sports today\n/tomorrow — all sports tomorrow\n/pdf — all sports today\n/pdf_tomorrow — all sports tomorrow\n/excel — all sports today\n/excel_tomorrow — all sports tomorrow\n/football, /basketball, /tennis — sport menus\n/search TEAM — search tomorrow's all-sport fixtures\n\n🤖 /analyze tomorrow 10 — football AI analysis for now.\n🎟️ /book — build a SportyBet booking code from available upcoming football markets.\n📎 Send a screenshot or PDF of picks to extract, match and prepare a booking code.",MAIN_MENU);
   }
   if(action==="leagues"||action==="markets"){
     const fixtures=await loadDay("all",1), counts=new Map();
@@ -353,6 +487,7 @@ async function handleWebhook(req,res){
   if(!chatId) return res.status(200).json({ok:true});
   try{
     if(callback){await answerCallback(callback.id);await handleAction(chatId,callback.data);return res.status(200).json({ok:true});}
+    if(msg.photo?.length||msg.document){await receiveDocument(chatId,msg);return res.status(200).json({ok:true});}
     const raw=(msg.text||"").trim(), text=raw.toLowerCase(), command=text.split(/\s+/)[0];
     if(command==="/book"){await startBooking(chatId);return res.status(200).json({ok:true});}
     if(command==="/start"||command==="/help"){await setBotCommands();await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
