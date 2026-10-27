@@ -386,7 +386,9 @@ async function prepareDocumentSlip(chatId) {
     }
     if(!fixture) { issues.push({pick,reason:"Fixture not found in upcoming SportyBet events (or team names did not match)."}); continue; }
     const marketNeed=normText(pick.market), selectionNeed=normText(pick.selection);
-    const markets=(fixture.markets||[]).filter(m=>m.status===undefined||String(m.status)==="1"||String(m.status).toLowerCase()==="active");
+    // Keep markets unless SportyBet explicitly marks them suspended/closed.
+    // Some feed variants use 0 for open and 1 for suspended, so only reject known closed states.
+    const markets=(fixture.markets||[]).filter(m=>!["suspended","closed","settled","inactive","2","3"].includes(String(m.status??"").toLowerCase()));
     const marketAliases = ({
       "1x2":["1x2","match result","full time result","1x2 full time"],
       "12":["double chance","1x2","match result"],
@@ -407,7 +409,10 @@ async function prepareDocumentSlip(chatId) {
       return marketAliases.some(alias=>names.some(n=>n===alias||n.includes(alias)||alias.includes(n))) ||
         marketIdAliases.includes(String(m.id));
     });
-    if(!market) { issues.push({pick,reason:`Fixture found, but market "${pick.market||"unclear"}" was not matched confidently.`}); continue; }
+    if(!market) {
+      console.warn("[document-market-debug]",JSON.stringify({pickMarket:pick.market,normalized:marketNeed,fixture:fixture.homeTeam+" vs "+fixture.awayTeam,marketCount:markets.length,available:markets.slice(0,35).map(m=>({id:m.id,name:m.name,desc:m.desc,status:m.status,outcomes:(m.outcomes||[]).slice(0,4).map(o=>({id:o.id,name:o.name,active:o.active,odds:o.odds}))}))}));
+      issues.push({pick,reason:`Fixture found, but market "${pick.market||"unclear"}" was not matched confidently. SportyBet returned ${markets.length} candidate markets.`}); continue;
+    }
     const outcomeAliases = selectionNeed==="home"||selectionNeed==="home win" ? ["1","home","home win"] :
       selectionNeed==="away"||selectionNeed==="away win" ? ["2","away","away win"] :
       selectionNeed==="draw" ? ["x","draw"] :
