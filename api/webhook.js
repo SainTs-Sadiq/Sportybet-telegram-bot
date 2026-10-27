@@ -346,8 +346,9 @@ async function prepareDocumentSlip(chatId) {
   for(const pick of doc.selections) {
     const likelySport=SPORTS[pick.sport]?pick.sport:"football";
     const candidateSports=likelySport==="other"?sportKeys:[likelySport,...sportKeys.filter(s=>s!==likelySport)];
-    const home=pick.homeTeam || (pick.match.includes(" vs ")?pick.match.split(/\\s+vs\\s+/i)[0]:"");
-    const away=pick.awayTeam || (pick.match.includes(" vs ")?pick.match.split(/\\s+vs\\s+/i).slice(1).join(" vs "):"");
+    const parts=String(pick.match||"").split(/\s+vs\s+/i);
+    const home=pick.homeTeam || (parts.length>1?parts[0]:"");
+    const away=pick.awayTeam || (parts.length>1?parts.slice(1).join(" vs "):"");
     let fixture=null;
     for(const sport of candidateSports) {
       fixture=(bySport.get(sport)||[]).find(f=>teamMatch(f.homeTeam,home)&&teamMatch(f.awayTeam,away));
