@@ -377,7 +377,7 @@ async function receiveDocument(chatId,msg) {
   const session={...extracted,createdAt:Date.now(),filename:name};
   documentSessions.set(String(chatId),session);
   const lines=extracted.selections.slice(0,35).map(p=>`${p.index}. ${p.match||`${p.homeTeam} vs ${p.awayTeam}`}
-   🎯 ${p.market||"Market unclear"}: ${p.selection||"Selection unclear"}${p.odds?` @ ${p.odds}`:""}${p.notes?`\n   ⚠️ ${p.notes}`:""}`);
+   🎯 ${p.market||"Market unclear"}: ${p.selection||"Selection unclear"}${p.odds?` @ ${p.odds}`:""}${p.confidence==="low"?`\n   ⚠️ Low confidence — will be double-checked by AI before matching`:p.confidence==="ai"?`\n   ✅ Re-read by AI — verify before booking`:p.notes?`\n   ⚠️ ${p.notes}`:""}`);
   const more=extracted.selections.length>35?`\n...and ${extracted.selections.length-35} more selections.`:"";
   await sendText(chatId,`🧾 EXTRACTED PICKS — REVIEW BEFORE BOOKING
 
