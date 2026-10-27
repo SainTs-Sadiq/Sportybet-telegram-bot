@@ -34,12 +34,10 @@ async function sendDocument(chatId,buffer,filename,caption){
 
 const MAIN_MENU={inline_keyboard:[
   [{text:"⚽ Football — Today",callback_data:"sport_football_today"},{text:"⚽ Football — Tomorrow",callback_data:"sport_football_tomorrow"}],
-  [{text:"📋 All Sports Today",callback_data:"all_today"},{text:"📅 All Sports Tomorrow",callback_data:"all_tomorrow"}],
-  [{text:"🌎 All Sports PDF — Today",callback_data:"pdf_today"},{text:"🌎 All Sports PDF — Tomorrow",callback_data:"pdf_tomorrow"}],
-  [{text:"📊 All Sports Excel — Today",callback_data:"excel_today"},{text:"📊 All Sports Excel — Tomorrow",callback_data:"excel_tomorrow"}],
+  [{text:"📄 PDF — Today",callback_data:"pdf_today"},{text:"📄 PDF — Tomorrow",callback_data:"pdf_tomorrow"}],
+  [{text:"📊 Excel — Today",callback_data:"excel_today"},{text:"📊 Excel — Tomorrow",callback_data:"excel_tomorrow"}],
   [{text:"🤖 AI 10 Picks",callback_data:"ai_tomorrow_10"},{text:"🤖 AI 20 Picks",callback_data:"ai_tomorrow_20"}],
-  [{text:"🎟️ Build Booking Code",callback_data:"book_start"}],
-  [{text:"🎯 Target Odds 10/20/50/100/500/1000",callback_data:"book_targets"}],
+  [{text:"🎟️ Build Booking Code",callback_data:"book_start"},{text:"🎯 Target Odds",callback_data:"book_targets"}],
   [{text:"🏆 Leagues",callback_data:"leagues"},{text:"📈 Markets",callback_data:"markets"}],
   [{text:"🔎 Search",callback_data:"search_help"},{text:"ℹ️ Help",callback_data:"help"}]
 ]};
@@ -49,7 +47,6 @@ const SPORT_MENU=()=>({inline_keyboard:[
     {text:`${SPORTS[k].label} — Today`,callback_data:`sport_${k}_today`},
     {text:`${SPORTS[k].label} — Tomorrow`,callback_data:`sport_${k}_tomorrow`}
   ]),
-  [{text:"🌎 All Sports — Today",callback_data:"all_today"},{text:"🌎 All Sports — Tomorrow",callback_data:"all_tomorrow"}],
   [{text:"⬅️ Main menu",callback_data:"menu"}]
 ]});
 
@@ -79,15 +76,21 @@ async function enrichCandidatesWithForm(fixtures,candidates,maxLeagues=30) {
   const byEvent = new Map(fixtures.map(f=>[String(f.eventId),f]));
   const leagueNames = [...new Set(fixtures.map(f=>f.league).filter(Boolean))].slice(0,maxLeagues);
   const analyses = new Map();
+  // Kick form requests off concurrently (capped) instead of awaiting each one;
+  // serial awaits dominated AI-pick generation time.
+  const CONCURRENCY = 8;
+  const pending = [];
   for (const fixture of fixtures) {
     if (!leagueNames.includes(fixture.league) || analyses.has(String(fixture.eventId))) continue;
     const key = [fixture.league,fixture.homeTeam,fixture.awayTeam].join("|");
-    try {
-      let promise=formRequestCache.get(key);
-      if(!promise){promise=getTeamFormAnalysis(fixture);formRequestCache.set(key,promise);}
-      const form=await promise;
-      if(form) analyses.set(String(fixture.eventId),form);
-    } catch(e) { console.warn("[team-form-analysis]",fixture.league,e.message); }
+    let promise=formRequestCache.get(key);
+    if(!promise){promise=getTeamFormAnalysis(fixture).catch(e=>{console.warn("[team-form-analysis]",fixture.league,e.message);return null;});formRequestCache.set(key,promise);}
+    pending.push({fixture,promise});
+  }
+  for (let i=0;i<pending.length;i+=CONCURRENCY) {
+    const batch=pending.slice(i,i+CONCURRENCY);
+    const forms=await Promise.all(batch.map(x=>x.promise));
+    batch.forEach((x,i2)=>{ if(forms[i2]) analyses.set(String(x.fixture.eventId),forms[i2]); });
   }
   const enriched=candidates.map(p=>{
     const fixture=byEvent.get(String(p.eventId)), form=analyses.get(String(p.eventId));
@@ -606,17 +609,13 @@ async function setBotCommands(){
   const commands=[
     {command:"start",description:"Open the multi-sport menu"},
     {command:"fixtures",description:"Choose sport and date"},
-    {command:"today",description:"All sports today"},
-    {command:"tomorrow",description:"All sports tomorrow"},
+    {command:"today",description:"Football today"},
+    {command:"tomorrow",description:"Football tomorrow"},
     {command:"football",description:"Football fixtures menu"},
-    {command:"basketball",description:"Basketball fixtures menu"},
-    {command:"tennis",description:"Tennis fixtures menu"},
-    {command:"pdf",description:"All sports PDF today"},
-    {command:"pdf_tomorrow",description:"All sports PDF tomorrow"},
-    {command:"all_pdf_today",description:"Download all sports PDF for today"},
-    {command:"all_pdf_tomorrow",description:"Download all sports PDF for tomorrow"},
-    {command:"excel",description:"All sports today's spreadsheet"},
-    {command:"excel_tomorrow",description:"All sports tomorrow's spreadsheet"},
+    {command:"pdf",description:"PDF report today"},
+    {command:"pdf_tomorrow",description:"PDF report tomorrow"},
+    {command:"excel",description:"Excel report today"},
+    {command:"excel_tomorrow",description:"Excel report tomorrow"},
     {command:"leagues",description:"List tomorrow's leagues"},
     {command:"markets",description:"List tomorrow's markets"},
     {command:"search",description:"Search fixtures"},
@@ -641,12 +640,12 @@ async function handleWebhook(req,res){
 
     if(command==="/book"){await startBooking(chatId);return res.status(200).json({ok:true});}
     if(command==="/start"||command==="/help"){await setBotCommands();await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
-    if(command==="/fixtures"||command==="/football"||command==="/basketball"||command==="/tennis"){
+    if(command==="/fixtures"||command==="/football"){
       const sport=command==="/fixtures"?"all":command.slice(1);
       await sendText(chatId,sport==="all"?"📋 Choose sport and date:":`${sportLabel(sport)}\n\nChoose date:`,SPORT_MENU());return res.status(200).json({ok:true});
     }
     if(command==="/today"||command==="/tomorrow"){await runReport(chatId,command,"all");return res.status(200).json({ok:true});}
-    if(command==="/pdf"||command==="/pdf_tomorrow"||command==="/all_pdf_today"||command==="/all_pdf_tomorrow"||command==="/excel"||command==="/excel_tomorrow"){const action=command==="/all_pdf_today"?"pdf_today":command==="/all_pdf_tomorrow"?"pdf_tomorrow":command.slice(1);await runReport(chatId,action,"all");return res.status(200).json({ok:true});}
+    if(command==="/pdf"||command==="/pdf_tomorrow"||command==="/excel"||command==="/excel_tomorrow"){await runReport(chatId,command.slice(1),"all");return res.status(200).json({ok:true});}
     if(command==="/leagues"||command==="/markets"){await handleAction(chatId,command.slice(1));return res.status(200).json({ok:true});}
     if(command==="/analyze"){const p=text.split(/\s+/),when=p[1]==="today"?0:1,n=Math.min(20,Math.max(1,Number(p[2])||10));await analyzeDay(chatId,when,n);return res.status(200).json({ok:true});}
     if(command==="/search"){
