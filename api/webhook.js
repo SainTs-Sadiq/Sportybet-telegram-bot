@@ -275,6 +275,30 @@ async function buildTargetBooking(chatId,target,offset=0) {
 function normText(value) {
   return String(value || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g," ").trim();
 }
+
+function parsePastedPicks(raw) {
+  const rows=[];
+  for (const line of String(raw||"").split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean)) {
+    if (/^(match|fixture|game|event)\\b/i.test(line) || /^[-|+\\s:]+$/.test(line)) continue;
+    const cells=(line.includes("|")?line.split("|"):line.includes("\\t")?line.split("\\t"):line.split(";")).map(x=>x.trim()).filter(Boolean);
+    if(cells.length<3) continue;
+    const match=cells[0], market=cells[1], selection=cells[2];
+    const oddsCell=cells.slice(3).find(x=>/^\\d+(?:\\.\\d+)?$/.test(x));
+    const odds=oddsCell?Number(oddsCell):null;
+    const teams=match.split(/\\s+(?:vs?\\.?|versus|@)\\s+|\\s+-\\s+/i);
+    if(teams.length<2||!market||!selection) continue;
+    rows.push({index:rows.length+1,sport:"football",homeTeam:teams[0].trim(),awayTeam:teams.slice(1).join(" vs ").trim(),match,market,selection,date:null,odds,notes:"Parsed directly from pasted text; confirm market matching."});
+  }
+  return rows.slice(0,100);
+}
+async function receivePastedPicks(chatId, raw) {
+  const selections=parsePastedPicks(raw);
+  if(!selections.length) return false;
+  documentSessions.set(String(chatId),{selections,documentNotes:"Parsed directly from pasted table without Gemini.",createdAt:Date.now(),filename:"pasted-picks"});
+  const lines=selections.slice(0,35).map(p=>`${p.index}. ${p.match}\\n   🎯 ${p.market}: ${p.selection}${p.odds?` @ ${p.odds}`:""}`);
+  await sendText(chatId,`🧾 PASTED PICKS — REVIEW\\n\\nParsed ${selections.length} selection(s) directly from your message.\\n\\n${lines.join("\\n\\n")}\\n\\nReview these rows before matching against live SportyBet markets.`,{inline_keyboard:[[{text:"🔎 Match picks & prepare slip",callback_data:"doc_prepare"}],[{text:"🗑 Discard picks",callback_data:"doc_cancel"}],[{text:"⬅️ Main menu",callback_data:"menu"}]]});
+  return true;
+}
 function teamMatch(a,b) {
   const x=normText(a), y=normText(b);
   return Boolean(x&&y&&(x===y||x.includes(y)||y.includes(x)));
@@ -489,6 +513,8 @@ async function handleWebhook(req,res){
     if(callback){await answerCallback(callback.id);await handleAction(chatId,callback.data);return res.status(200).json({ok:true});}
     if(msg.photo?.length||msg.document){await receiveDocument(chatId,msg);return res.status(200).json({ok:true});}
     const raw=(msg.text||"").trim(), text=raw.toLowerCase(), command=text.split(/\s+/)[0];
+    if(raw && !raw.startsWith("/")) { const parsed=await receivePastedPicks(chatId,raw); if(parsed) return res.status(200).json({ok:true}); }
+
     if(command==="/book"){await startBooking(chatId);return res.status(200).json({ok:true});}
     if(command==="/start"||command==="/help"){await setBotCommands();await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
     if(command==="/fixtures"||command==="/football"||command==="/basketball"||command==="/tennis"){
