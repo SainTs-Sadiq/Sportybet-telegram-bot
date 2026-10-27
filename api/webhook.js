@@ -362,21 +362,27 @@ async function prepareDocumentSlip(chatId) {
   const doc=documentSessions.get(String(chatId));
   if(!doc) return sendText(chatId,"No uploaded document is waiting. Send a screenshot or PDF first.",MAIN_MENU);
   await sendText(chatId,"🔎 Matching the extracted picks against live SportyBet fixtures and markets. This can take a little while...");
-  const sportKeys=Object.keys(SPORTS);
+  // These accumulator rows were built from the 28 October 2026 fixture report.
+  // Only fetch sports present in the extracted picks, then retain events on that exact
+  // calendar date in the configured report timezone.
+  const allSportKeys=Object.keys(SPORTS);
+  const sportKeys=[...new Set(doc.selections.map(p=>SPORTS[p.sport]?p.sport:"football"))];
   const bySport=new Map();
-  // Fetch sports concurrently and only request a short window around tomorrow.
-  // The previous sequential 10-page fetch per sport could exceed Vercel's webhook duration.
+  const targetDate=process.env.DOCUMENT_TARGET_DATE || "2026-10-28";
+  function dateInReportTZ(ms) {
+    return new Intl.DateTimeFormat("en-CA",{timeZone:TZ,year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(Number(ms)));
+  }
   const fixtureLoads=await Promise.allSettled(sportKeys.map(async key=>{
     const cfg=SPORTS[key];
-    const fixtures=await getFixtures({hours:120,pageSize:100,maxPages:3,sportId:cfg.sportId});
-    return [key,fixtures.filter(f=>Number(f.startMs)>Date.now())];
+    const fixtures=await getFixtures({hours:48,pageSize:100,maxPages:5,sportId:cfg.sportId});
+    return [key,fixtures.filter(f=>Number(f.startMs)>Date.now() && dateInReportTZ(f.startMs)===targetDate)];
   }));
   fixtureLoads.forEach((result,i)=>{
     const key=sportKeys[i];
     if(result.status==="fulfilled") bySport.set(result.value[0],result.value[1]);
     else { console.warn("[document-picks-fixtures]",key,result.reason?.message||String(result.reason)); bySport.set(key,[]); }
   });
-  console.log("[document-picks-load-summary]",JSON.stringify(Object.fromEntries([...bySport].map(([k,v])=>[k,v.length]))));
+  console.log("[document-picks-load-summary]",JSON.stringify({targetDate,timezone:TZ,counts:Object.fromEntries([...bySport].map(([k,v])=>[k,v.length]))}));
   const matched=[], issues=[];
   for(const pick of doc.selections) {
     const likelySport=SPORTS[pick.sport]?pick.sport:"football";
