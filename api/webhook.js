@@ -278,14 +278,16 @@ function normText(value) {
 
 function parsePastedPicks(raw) {
   const rows=[];
-  for (const line of String(raw||"").split(/\\r?\\n/).map(x=>x.trim()).filter(Boolean)) {
-    if (/^(match|fixture|game|event)\\b/i.test(line) || /^[-|+\\s:]+$/.test(line)) continue;
-    const cells=(line.includes("|")?line.split("|"):line.includes("\\t")?line.split("\\t"):line.split(";")).map(x=>x.trim()).filter(Boolean);
+  const lines=String(raw||"").replace(/\r\n/g,"\n").split(/\n/).map(x=>x.trim()).filter(Boolean);
+  for (const line of lines) {
+    if (/^(match|fixture|game|event)\s*(?:\||;|\t|$)/i.test(line) || /^[-|+\s:]+$/.test(line)) continue;
+    const cells=(line.includes("|")?line.split("|"):line.includes("\t")?line.split("\t"):line.split(";")).map(x=>x.trim()).filter(Boolean);
     if(cells.length<3) continue;
     const match=cells[0], market=cells[1], selection=cells[2];
-    const oddsCell=cells.slice(3).find(x=>/^\\d+(?:\\.\\d+)?$/.test(x));
+    if (/^(match|fixture|game|event)$/i.test(match) || /^(market)$/i.test(market) || /^(selection|pick|outcome)$/i.test(selection)) continue;
+    const oddsCell=cells.slice(3).find(x=>/^\d+(?:\.\d+)?$/.test(x));
     const odds=oddsCell?Number(oddsCell):null;
-    const teams=match.split(/\\s+(?:v\\.?s?\\.?|versus|@)\\s+|\\s+-\\s+/i);
+    const teams=match.split(/\s+(?:v\.?s?\.?|versus|@)\s+|\s+-\s+/i);
     if(!market||!selection||!match) continue;
     const homeTeam=teams.length>1?teams[0].trim():"";
     const awayTeam=teams.length>1?teams.slice(1).join(" vs ").trim():"";
@@ -296,9 +298,10 @@ function parsePastedPicks(raw) {
 async function receivePastedPicks(chatId, raw) {
   const selections=parsePastedPicks(raw);
   if(!selections.length) return false;
-  documentSessions.set(String(chatId),{selections,documentNotes:"Parsed directly from pasted table without Gemini.",createdAt:Date.now(),filename:"pasted-picks"});
-  const lines=selections.slice(0,35).map(p=>`${p.index}. ${p.match}\\n   🎯 ${p.market}: ${p.selection}${p.odds?` @ ${p.odds}`:""}`);
-  await sendText(chatId,`🧾 PASTED PICKS — REVIEW\\n\\nParsed ${selections.length} selection(s) directly from your message.\\n\\n${lines.join("\\n\\n")}\\n\\nReview these rows before matching against live SportyBet markets.`,{inline_keyboard:[[{text:"🔎 Match picks & prepare slip",callback_data:"doc_prepare"}],[{text:"🗑 Discard picks",callback_data:"doc_cancel"}],[{text:"⬅️ Main menu",callback_data:"menu"}]]});
+  documentSessions.set(String(chatId),{selections,documentNotes:"Parsed directly from pasted text without Gemini.",createdAt:Date.now(),filename:"pasted-picks"});
+  const lines=selections.slice(0,35).map(p=>`${p.index}. ${p.match}\n   🎯 ${p.market}: ${p.selection}${p.odds ? ` @ ${p.odds}` : ""}`);
+  const more=selections.length>35?`\n…and ${selections.length-35} more selections.`:"";
+  await sendText(chatId,`🧾 PASTED PICKS — REVIEW\n\nParsed ${selections.length} selection(s) directly from your message.\n\n${lines.join("\n\n")}${more}\n\nReview these rows before matching against live SportyBet markets.`,{inline_keyboard:[[{text:"🔎 Match picks & prepare slip",callback_data:"doc_prepare"}],[{text:"🗑 Discard picks",callback_data:"doc_cancel"}],[{text:"⬅️ Main menu",callback_data:"menu"}]]});
   return true;
 }
 function teamMatch(a,b) {
