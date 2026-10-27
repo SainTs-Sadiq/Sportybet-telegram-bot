@@ -487,6 +487,7 @@ async function handleWebhook(req,res){
   if(!chatId) return res.status(200).json({ok:true});
   try{
     if(callback){await answerCallback(callback.id);await handleAction(chatId,callback.data);return res.status(200).json({ok:true});}
+    if(msg.photo?.length||msg.document){await receiveDocument(chatId,msg);return res.status(200).json({ok:true});}
     const raw=(msg.text||"").trim(), text=raw.toLowerCase(), command=text.split(/\s+/)[0];
     if(command==="/book"){await startBooking(chatId);return res.status(200).json({ok:true});}
     if(command==="/start"||command==="/help"){await setBotCommands();await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
