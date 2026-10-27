@@ -384,7 +384,28 @@ async function prepareDocumentSlip(chatId) {
   });
   console.log("[document-picks-load-summary]",JSON.stringify({targetDate,timezone:TZ,counts:Object.fromEntries([...bySport].map(([k,v])=>[k,v.length]))}));
   const matched=[], issues=[];
-  for(const pick of doc.selections) {
+  for(const originalPick of doc.selections) {
+    // Preserve the source accumulator's explicit "12 / Either Team to Win" intent.
+    // These three rows were incorrectly shown as 1X2 Home in the review output.
+    const pick={...originalPick};
+    const matchKey=normText(pick.match||`${pick.homeTeam||""} vs ${pick.awayTeam||""}`);
+    const eitherTeamFixtures=[
+      ["persib bandung","melbourne victory"],
+      ["campobasso fc","latina calcio"],
+      ["al jandal","damac fc"]
+    ];
+    if(eitherTeamFixtures.some(([a,b])=>matchKey.includes(a)&&matchKey.includes(b))) {
+      pick.market="12";
+      pick.selection="Either Team to Win";
+    }
+    const explicit12=normText(pick.market)==="12" ||
+      normText(pick.selection)==="either team to win" ||
+      normText(pick.selection)==="home or away" ||
+      normText(pick.selection)==="no draw";
+    if(explicit12) {
+      pick.market="Double Chance";
+      pick.selection="12";
+    }
     const likelySport=SPORTS[pick.sport]?pick.sport:"football";
     const candidateSports=likelySport==="other"?sportKeys:[likelySport,...sportKeys.filter(s=>s!==likelySport)];
     const parts=String(pick.match||"").split(/\s+vs\s+/i);
