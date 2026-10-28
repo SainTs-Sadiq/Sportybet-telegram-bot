@@ -282,7 +282,9 @@ async function prepareDocumentSlip(chatId) {
   // Search the full upcoming SportyBet feed, not a hard-coded calendar date.
   // Load only sports represented by the uploaded/pasted picks, and search a broad
   // 30-day horizon with pagination. Keep all future fixtures returned by the feed.
-  const sportKeys=[...new Set(doc.selections.map(p=>SPORTS[p.sport]?p.sport:"football"))];
+  // Pick documents mislabel sports (the local parser tags rows "football" by
+  // default), so always load every enabled sport and try each.
+  const sportKeys=[...SPORT_ORDER];
   const bySport=new Map();
   const fixtureLoads=await Promise.allSettled(sportKeys.map(async key=>{
     const cfg=SPORTS[key];
@@ -354,11 +356,15 @@ async function prepareDocumentSlip(chatId) {
       "both teams to score":["29"], "gg ng":["29"],
       "odd even":["26"], "handicap":["14"]
     })[marketNeed] || [];
-    const market=markets.find(m=>{
-      const names=[normText(m.name),normText(m.desc)].filter(Boolean);
-      return marketAliases.some(alias=>names.some(n=>n===alias||n.includes(alias)||alias.includes(n))) ||
-        marketIdAliases.includes(String(m.id));
-    });
+    // Prefer an exact market-id match: fuzzy name matching can land on a
+    // combined market ("Over/Under and GG/NG") whose outcomes never match.
+    let market=marketIdAliases.length?markets.find(m=>marketIdAliases.includes(String(m.id))):null;
+    if(!market) {
+      market=markets.find(m=>{
+        const names=[normText(m.name),normText(m.desc)].filter(Boolean);
+        return marketAliases.some(alias=>names.some(n=>n===alias||n.includes(alias)||alias.includes(n)));
+      });
+    }
     if(!market) {
       console.warn("[document-market-debug]",JSON.stringify({pickMarket:pick.market,normalized:marketNeed,fixture:fixture.homeTeam+" vs "+fixture.awayTeam,marketCount:markets.length,available:markets.slice(0,35).map(m=>({id:m.id,name:m.name,desc:m.desc,status:m.status,outcomes:(m.outcomes||[]).slice(0,4).map(o=>({id:o.id,name:o.name,active:o.active,odds:o.odds}))}))}));
       issues.push({pick,reason:`Fixture found, but market "${pick.market||"unclear"}" was not matched confidently. SportyBet returned ${markets.length} candidate markets.`}); continue;
