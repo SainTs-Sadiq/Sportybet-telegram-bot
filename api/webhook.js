@@ -35,6 +35,7 @@ async function sendDocument(chatId,buffer,filename,caption){
 
 const MAIN_MENU={inline_keyboard:[
   [{text:"⚽ Football — Today",callback_data:"sport_football_today"},{text:"⚽ Football — Tomorrow",callback_data:"sport_football_tomorrow"}],
+  [{text:"🏀 Basketball — Today",callback_data:"sport_basketball_today"},{text:"🏀 Basketball — Tomorrow",callback_data:"sport_basketball_tomorrow"}],
   [{text:"📄 PDF — Today",callback_data:"pdf_today"},{text:"📄 PDF — Tomorrow",callback_data:"pdf_tomorrow"}],
   [{text:"📊 Excel — Today",callback_data:"excel_today"},{text:"📊 Excel — Tomorrow",callback_data:"excel_tomorrow"}],
   [{text:"🏆 Leagues",callback_data:"leagues"},{text:"📈 Markets",callback_data:"markets"}],
