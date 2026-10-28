@@ -62,7 +62,7 @@ async function loadSportDay(sport,offset){
   const hit=cache.get(key);
   if(hit && Date.now()-hit.at<45000) return hit.fixtures;
   const cfg=getSport(sport); if(!cfg) throw new Error(`Unsupported sport: ${sport}`);
-  const raw=await getFixtures({hours:offset?72:48,pageSize:100,maxPages:10,sportId:cfg.sportId,marketIds:sport==="football"?undefined:[]});
+  const raw=await getFixtures({hours:offset?72:48,pageSize:100,maxPages:10,sportId:cfg.sportId});
   const expectedSportId=cfg.sportId;
   // If SportyBet supplies sport metadata, reject events that contradict the requested sport.
   const verified=raw.filter(f=>!f.sourceSportId || String(f.sourceSportId)===expectedSportId);
@@ -466,6 +466,7 @@ async function setBotCommands(){
     {command:"today",description:"Football today"},
     {command:"tomorrow",description:"Football tomorrow"},
     {command:"football",description:"Football fixtures menu"},
+    {command:"basketball",description:"Basketball fixtures menu"},
     {command:"pdf",description:"PDF report today"},
     {command:"pdf_tomorrow",description:"PDF report tomorrow"},
     {command:"excel",description:"Excel report today"},
@@ -495,7 +496,7 @@ async function handleWebhook(req,res){
     if(raw && !raw.startsWith("/")) { const parsed=await receivePastedPicks(chatId,raw); if(parsed){await persistSessions(chatId);return res.status(200).json({ok:true});} }
 
     if(command==="/start"||command==="/help"){await setBotCommands();await kvDel(STOP_KEY);await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
-    if(command==="/fixtures"||command==="/football"){
+    if(command==="/fixtures"||command==="/football"||command==="/basketball"){
       const sport=command==="/fixtures"?"all":command.slice(1);
       await sendText(chatId,sport==="all"?"📋 Choose sport and date:":`${sportLabel(sport)}\n\nChoose date:`,SPORT_MENU());return res.status(200).json({ok:true});
     }
