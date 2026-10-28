@@ -358,6 +358,12 @@ async function prepareDocumentSlip(chatId) {
     })[marketNeed] || [];
     // Prefer an exact market-id match: fuzzy name matching can land on a
     // combined market ("Over/Under and GG/NG") whose outcomes never match.
+    // A "12 / Either Team to Win" pick is only valid on a real Double Chance
+    // market; never let it fall back to 1X2 (that is how Draw got selected).
+    if(explicit12 && !markets.some(m=>String(m.id)==="10")) {
+      issues.push({pick,reason:"No Double Chance market is available for this fixture, so the either-team-to-win pick cannot be placed."});
+      continue;
+    }
     let market=marketIdAliases.length?markets.find(m=>marketIdAliases.includes(String(m.id))):null;
     if(!market) {
       market=markets.find(m=>{
@@ -388,7 +394,7 @@ async function prepareDocumentSlip(chatId) {
       const n=normText(o.name);
       const id=String(o.id).toLowerCase();
       return (o.active===true || o.active===undefined || o.active===null) && Number(o.odds)>1&&(
-        [...expandedOutcomeAliases.map(normText),...normalizedOutcomeAliases].some(alias=>alias && (n===alias||n.includes(alias)||alias.includes(n))) ||
+        [...expandedOutcomeAliases.map(normText),...normalizedOutcomeAliases].some(alias=>alias && (n===alias||n.includes(alias))) ||
         (selectionIsHome && ["1","home","home win"].includes(id)) ||
         (selectionIsAway && ["2","away","away win"].includes(id))
       );
