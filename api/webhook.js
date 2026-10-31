@@ -201,13 +201,24 @@ function interpretPastedSelection(rawSelection) {
   return {market:text,selection:text,specifier:""};
 }
 
-function parsePastedPicks(raw) {
+export function hasPipeTableRows(raw) {
+  const lines=String(raw||"").split(/\r?\n/).filter(line=>line.includes("|"));
+  return lines.filter(line=>{
+    let cells=line.split("|").map(cell=>cell.trim()).filter(Boolean);
+    if(cells.length>=4 && /^\d+\.?$/.test(cells[0])) cells=cells.slice(1);
+    if(cells.length<3 || /^(match|fixture|game|event)$/i.test(cells[0])) return false;
+    return /\s+(?:vs?\.?|@)\s+/i.test(cells[0]);
+  }).length>=2;
+}
+
+export function parsePastedPicks(raw) {
   const rows=[];
   const input=String(raw||"").replace(/\r\n/g,"\n");
-  const lines = input.includes("|") ? input.split(/\s*;\s*(?=[^;]+\|)/) : input.split(/\r?\n/);
+  const lines = input.includes("\n") ? input.split(/\r?\n/) : input.includes("|") ? input.split(/\s*;\s*(?=[^;]+\|)/) : input.split(/\r?\n/);
   for (const line of lines.map(x=>x.trim()).filter(Boolean)) {
     if (/^(match|fixture|game|event)\s*(?:\||;|\t|$)/i.test(line) || /^[-|+\s:]+$/.test(line)) continue;
-    const cells=(line.includes("|")?line.split("|"):line.includes("\t")?line.split("\t"):line.split(";")).map(x=>x.trim());
+    let cells=(line.includes("|")?line.split("|"):line.includes("\t")?line.split("\t"):line.split(";")).map(x=>x.trim());
+    if(cells.length>=4 && /^\d+\.?$/.test(cells[0])) cells=cells.slice(1);
     if(cells.length<3) continue;
     const candidates = cells.length===3 ? [0,1] : cells.length>=4 ? [0,1] : [0];
     let split=null;
@@ -558,7 +569,7 @@ async function setBotCommands(){
   try{await tg("setMyCommands",{commands})}catch(e){console.error(e)}
 }
 
-async function handleWebhook(req,res){
+export async function handleWebhook(req,res){
   if(req.method!=="POST") return res.status(200).json({ok:true});
   if(SECRET&&req.headers["x-telegram-bot-api-secret-token"]!==SECRET) return res.status(401).end();
   const update=req.body||{}, msg=update.message, callback=update.callback_query, chatId=msg?.chat?.id||callback?.message?.chat?.id;
@@ -572,6 +583,12 @@ async function handleWebhook(req,res){
     if(callback){await answerCallback(callback.id);await handleAction(chatId,callback.data);await persistSessions(chatId);return res.status(200).json({ok:true});}
     if(msg.photo?.length||msg.document){await receiveDocument(chatId,msg);await persistSessions(chatId);return res.status(200).json({ok:true});}
     const raw=(msg.text||"").trim(), text=raw.toLowerCase(), command=text.split(/\s+/)[0];
+    const messageIsPipeSlip=hasPipeTableRows(raw);
+    if(raw && messageIsPipeSlip) {
+      const parsed=await receivePastedPicks(chatId,raw);
+      if(parsed){await persistSessions(chatId);await prepareDocumentSlip(chatId);return res.status(200).json({ok:true});}
+    }
+
     if(raw && !raw.startsWith("/")) { const parsed=await receivePastedPicks(chatId,raw); if(parsed){await persistSessions(chatId);return res.status(200).json({ok:true});} }
 
     if(command==="/start"||command==="/help"){await setBotCommands();await kvDel(STOP_KEY);await sendText(chatId,"⚽🏀🎾 SportyBet Markets Bot\n\nChoose a sport or request all sports:",MAIN_MENU);return res.status(200).json({ok:true});}
