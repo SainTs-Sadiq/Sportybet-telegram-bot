@@ -184,22 +184,57 @@ function normText(value) {
   return String(value || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g," ").trim();
 }
 
+function inferSport(homeTeam, awayTeam, matchText = "") {
+  const combined=normText(`${homeTeam} ${awayTeam} ${matchText}`);
+  const basketballHints=/\b(basketball|nba|wnba|euroleague|ncaa|nbl|cba|fiba|basketball club)\b/.test(combined);
+  return basketballHints ? "basketball" : "football";
+}
+
+function interpretPastedSelection(rawSelection) {
+  const text=String(rawSelection||"").trim();
+  const dnb=text.match(/^(.*?)\s+draw\s+no\s+bet$/i);
+  if(dnb) return {market:"Draw No Bet",selection:dnb[1].trim(),specifier:""};
+  const handicap=text.match(/^(.*?)\s+(-?\d+(?:\.\d+)?)\s+(?:asian\s+)?handicap$/i);
+  if(handicap) return {market:"Handicap",selection:handicap[1].trim(),specifier:handicap[2]};
+  const win=text.match(/^(.*?)\s+win$/i);
+  if(win) return {market:"1X2",selection:win[1].trim(),specifier:""};
+  return {market:text,selection:text,specifier:""};
+}
+
 function parsePastedPicks(raw) {
   const rows=[];
-  const lines=String(raw||"").replace(/\r\n/g,"\n").split(/\n/).map(x=>x.trim()).filter(Boolean);
-  for (const line of lines) {
+  const input=String(raw||"").replace(/\r\n/g,"\n");
+  const lines = input.includes("|") ? input.split(/\s*;\s*(?=[^;]+\|)/) : input.split(/\r?\n/);
+  for (const line of lines.map(x=>x.trim()).filter(Boolean)) {
     if (/^(match|fixture|game|event)\s*(?:\||;|\t|$)/i.test(line) || /^[-|+\s:]+$/.test(line)) continue;
-    const cells=(line.includes("|")?line.split("|"):line.includes("\t")?line.split("\t"):line.split(";")).map(x=>x.trim()).filter(Boolean);
+    const cells=(line.includes("|")?line.split("|"):line.includes("\t")?line.split("\t"):line.split(";")).map(x=>x.trim());
     if(cells.length<3) continue;
-    const match=cells[0], market=cells[1], selection=cells[2];
-    if (/^(match|fixture|game|event)$/i.test(match) || /^(market)$/i.test(market) || /^(selection|pick|outcome)$/i.test(selection)) continue;
-    const oddsCell=cells.slice(3).find(x=>/^\d+(?:\.\d+)?$/.test(x));
-    const odds=oddsCell?Number(oddsCell):null;
-    const teams=match.split(/\s+(?:v\.?s?\.?|versus|@)\s+|\s+-\s+/i);
-    if(!market||!selection||!match) continue;
-    const homeTeam=teams.length>1?teams[0].trim():"";
-    const awayTeam=teams.length>1?teams.slice(1).join(" vs ").trim():"";
-    rows.push({index:rows.length+1,sport:"football",homeTeam,awayTeam,match,market,selection,date:null,odds,notes:teams.length>1?"Parsed from pasted text; confirm market matching.":"Fixture separator unclear; verify before booking."});
+    const candidates = cells.length===3 ? [0,1] : cells.length>=4 ? [0,1] : [0];
+    let split=null;
+    for (const i of candidates) {
+      const left=cells[i].split(/\s+(?:vs\.?|v\.?|@)\s+/i);
+      if(left.length===2&&left.every(Boolean)) { split={match:cells[i],homeTeam:left[0].trim(),awayTeam:left[1].trim(),rest:cells.slice(i+1)}; break; }
+    }
+    if(!split){
+      const match=cells[0];
+      const legacyMarket=cells.length>=4?cells[1]:"";
+      const rawSelection=cells.length>=4?cells[2]:cells[1];
+      const interpreted=legacyMarket?{market:legacyMarket,selection:rawSelection,specifier:""}:interpretPastedSelection(rawSelection);
+      const market=interpreted.market, selection=interpreted.selection;
+      if (/^(match|fixture|game|event)$/i.test(match) || /^(market)$/i.test(market) || /^(selection|pick|outcome)$/i.test(selection)) continue;
+      const oddsCell=cells.length>=4?cells[3]:cells[2];
+      const odds=/^\d+(?:\.\d+)?$/.test(oddsCell)?Number(oddsCell):null;
+      const teams=match.split(/\s+(?:vs\.?|v\.?|@)\s+/i);
+      const homeTeam=teams[0]?.trim()||match, awayTeam=teams[1]?.trim()||"";
+      rows.push({index:rows.length+1,sport:inferSport(homeTeam,awayTeam,match),homeTeam,awayTeam,match,market,selection,specifier:interpreted.specifier||"",date:null,odds,notes:teams.length>1?"Parsed from pasted text; confirm market matching.":"Fixture separator unclear; verify before booking."});
+      continue;
+    }
+    const match=split.match, homeTeam=split.homeTeam, awayTeam=split.awayTeam;
+    let rawSelection=split.rest[0]||"", oddsCell=split.rest[1]||"";
+    if(split.rest.length===1 && /^\d+(?:\.\d+)?$/.test(split.rest[0])) { rawSelection=""; oddsCell=split.rest[0]; }
+    const parsed=interpretPastedSelection(rawSelection);
+    const odds=/^\d+(?:\.\d+)?$/.test(oddsCell)?Number(oddsCell):null;
+    rows.push({index:rows.length+1,sport:inferSport(homeTeam,awayTeam,match),homeTeam,awayTeam,match,market:parsed.market,selection:parsed.selection,specifier:parsed.specifier||"",date:null,odds,notes:"Parsed from pasted text; confirm market matching."});
   }
   return rows.slice(0,100);
 }
@@ -286,6 +321,7 @@ async function prepareDocumentSlip(chatId) {
   // default), so always load every enabled sport and try each.
   const sportKeys=[...SPORT_ORDER];
   const bySport=new Map();
+  const fixtureErrors=new Map();
   const fixtureLoads=await Promise.allSettled(sportKeys.map(async key=>{
     const cfg=SPORTS[key];
     const fixtures=await getFixturesCached(getFixtures,{hours:720,pageSize:100,maxPages:20,sportId:cfg.sportId});
@@ -294,9 +330,15 @@ async function prepareDocumentSlip(chatId) {
   fixtureLoads.forEach((result,i)=>{
     const key=sportKeys[i];
     if(result.status==="fulfilled") bySport.set(result.value[0],result.value[1]);
-    else { console.warn("[document-picks-fixtures]",key,result.reason?.message||String(result.reason)); bySport.set(key,[]); }
+    else { const message=result.reason?.message||String(result.reason); fixtureErrors.set(key,message); console.warn("[document-picks-fixtures]",key,message); bySport.set(key,[]); }
   });
-  console.log("[document-picks-load-summary]",JSON.stringify({horizonHours:720,pagesPerSport:20,counts:Object.fromEntries([...bySport].map(([k,v])=>[k,v.length]))}));
+  const fixtureCounts=Object.fromEntries(sportKeys.map(key=>[key,bySport.get(key)?.length||0]));
+  console.log("[document-picks-load-summary]",JSON.stringify({horizonHours:720,pagesPerSport:20,counts:fixtureCounts,errors:Object.fromEntries(fixtureErrors)}));
+  if(fixtureErrors.size===sportKeys.length) {
+    const errorLines=[...fixtureErrors].map(([sport,message])=>`${sport}: ${message}`).join("\n");
+    return sendText(chatId,`⚠️ SportyBet's fixture feed could not be loaded for any sport, so no rows were matched and no booking code was requested.\n\n${errorLines}`,MAIN_MENU);
+  }
+  const skippedNotice=fixtureErrors.size?`\n\n⚠️ Could not load ${[...fixtureErrors.keys()].map(sportLabel).join(", ")}; picks for those sports may be unmatched.`:"";
   const matched=[], issues=[];
   for(const originalPick of doc.selections) {
     // Preserve the source accumulator's explicit "12 / Either Team to Win" intent
@@ -310,8 +352,11 @@ async function prepareDocumentSlip(chatId) {
       pick.market="Double Chance";
       pick.selection="12";
     }
-    const likelySport=SPORTS[pick.sport]?pick.sport:"football";
-    const candidateSports=likelySport==="other"?sportKeys:[likelySport,...sportKeys.filter(s=>s!==likelySport)];
+    const explicitSport=SPORTS[pick.sport]?pick.sport:null;
+    const inferredText=normText(`${pick.match||""} ${pick.homeTeam||""} ${pick.awayTeam||""} ${pick.market||""} ${pick.selection||""}`);
+    const basketballHint=/\b(basketball|nba|wnba|nbl|ncaa|euroleague|fiba|cairns taipans|melbourne united|whai)\b/.test(inferredText);
+    const likelySport=explicitSport==="basketball"||(!explicitSport&&basketballHint)?"basketball":"football";
+    const candidateSports=[likelySport,...sportKeys.filter(s=>s!==likelySport)];
     const parts=String(pick.match||"").split(/\s+vs\s+/i);
     const home=pick.homeTeam || (parts.length>1?parts[0]:"");
     const away=pick.awayTeam || (parts.length>1?parts.slice(1).join(" vs "):"");
@@ -336,8 +381,16 @@ async function prepareDocumentSlip(chatId) {
       }
       if(best && bestScore>=0.6) fixture=best;
     }
-    if(!fixture) { issues.push({pick,reason:"Fixture not found in upcoming SportyBet events (or team names did not match)."}); continue; }
+    if(!fixture) {
+      const failedSports=candidateSports.filter(s=>fixtureErrors.has(s));
+      const loadedSports=candidateSports.filter(s=>!fixtureErrors.has(s));
+      const reason=loadedSports.length
+        ? `Fixture not found in loaded upcoming feeds. Fixture counts: ${loadedSports.map(s=>`${s} ${fixtureCounts[s]}`).join(", ")}.`
+        : `Could not check this row because fixture feeds failed: ${failedSports.map(s=>`${s}: ${fixtureErrors.get(s)}`).join("; ")}.`;
+      issues.push({pick,reason}); continue;
+    }
     const marketNeed=normText(pick.market), selectionNeed=normText(pick.selection);
+    const requestedOdds=Number(pick.odds);
     // Keep markets unless SportyBet explicitly marks them suspended/closed.
     // Some feed variants use 0 for open and 1 for suspended, so only reject known closed states.
     const markets=(fixture.markets||[]).filter(m=>!["suspended","closed","settled","inactive","2","3"].includes(String(m.status??"").toLowerCase()));
@@ -345,17 +398,21 @@ async function prepareDocumentSlip(chatId) {
       "1x2":["1x2","match result","full time result","1x2 full time"],
       "12":["double chance","1x2","match result"],
       "either team to win":["double chance","1x2"],
+      "home win":["1x2","match result"],
+      "away win":["1x2","match result"],
       "over under":["over under","over under goals","total goals"],
       "both teams to score":["gg ng","both teams to score","btts"],
       "double chance":["double chance"]
     })[marketNeed] || [marketNeed];
-    const marketIdAliases = ({
-      "1x2":["1"], "match result":["1"], "full time result":["1"],
-      "double chance":["10"], "12":["10"],
-      "draw no bet":["11"], "over under":["18"], "over under goals":["18"],
-      "both teams to score":["29"], "gg ng":["29"],
-      "odd even":["26"], "handicap":["14"]
-    })[marketNeed] || [];
+    const marketIdAliases = marketNeed==="1x2"||marketNeed==="match result"||marketNeed==="full time result"||marketNeed==="home win"||marketNeed==="away win"
+      ? (fixture.sportId==="sr:sport:2"?["219"]:["1"])
+      : ({
+        "1x2":["1"], "match result":["1"], "full time result":["1"],
+        "double chance":["10"], "12":["10"],
+        "draw no bet":["11"], "over under":["18"], "over under goals":["18"],
+        "both teams to score":["29"], "gg ng":["29"],
+        "odd even":["26"], "handicap":["14"]
+      })[marketNeed] || [];
     // Prefer an exact market-id match: fuzzy name matching can land on a
     // combined market ("Over/Under and GG/NG") whose outcomes never match.
     // A "12 / Either Team to Win" pick is only valid on a real Double Chance
@@ -365,6 +422,10 @@ async function prepareDocumentSlip(chatId) {
       continue;
     }
     let market=marketIdAliases.length?markets.find(m=>marketIdAliases.includes(String(m.id))):null;
+    if(market && marketIdAliases.includes("14") && pick.specifier) {
+      const wantedLine=normText(pick.specifier);
+      market=markets.find(m=>String(m.id)==="14"&&normText(m.specifier)===wantedLine)||null;
+    }
     if(!market) {
       market=markets.find(m=>{
         const names=[normText(m.name),normText(m.desc)].filter(Boolean);
@@ -404,13 +465,18 @@ async function prepareDocumentSlip(chatId) {
         console.warn("[document-dc-outcome-debug]",JSON.stringify({fixture:fixture.homeTeam+" vs "+fixture.awayTeam,marketId:market.id,marketName:market.name,wanted:pick.selection,outcomes:(market.outcomes||[]).map(o=>({id:o.id,name:o.name,active:o.active,odds:o.odds}))}));
       }
       issues.push({pick,reason:`Market found, but outcome "${pick.selection||"unclear"}" is unavailable or did not match.`}); continue; }
+    const liveOdds=Number(outcome.odds);
+    if(Number.isFinite(requestedOdds)&&requestedOdds>1&&Math.abs(requestedOdds-liveOdds)>0.0001) {
+      issues.push({pick,reason:`Live odds differ from stated odds: stated ${requestedOdds.toFixed(2)}, live ${liveOdds.toFixed(2)} (market ${market.id}, outcome ${outcome.id}); not included.`}); continue;
+    }
     if(matched.some(x=>x.eventId===fixture.eventId)) { issues.push({pick,reason:"SportyBet booking builder currently allows one selection per event; duplicate fixture selection was skipped."}); continue; }
     if(matched.length>=50) { issues.push({pick,reason:"50-selection limit reached; remaining picks were not included."}); continue; }
     matched.push({eventId:fixture.eventId,marketId:String(market.id),specifier:String(market.specifier||""),outcomeId:String(outcome.id),odds:Number(outcome.odds),startMs:Number(fixture.startMs),label:`${fixture.homeTeam} vs ${fixture.awayTeam} — ${market.name}: ${outcome.name} @ ${Number(outcome.odds).toFixed(2)}`,key:[fixture.eventId,market.id,market.specifier||"",outcome.id].join(":")});
   }
-  if(!matched.length) {
-    const details=issues.slice(0,12).map((x,i)=>`${i+1}. ${x.pick.match||x.pick.selection}: ${x.reason}`).join("\n");
-    return sendText(chatId,`⚠️ I couldn't confidently match any selections to active SportyBet markets, so no booking code was requested.\n\n${details||"Please upload a clearer document."}`,MAIN_MENU);
+  if(issues.length || matched.length!==doc.selections.length) {
+    const details=issues.map((x,i)=>`${i+1}. ${x.pick.match||x.pick.selection}: ${x.reason}`).join("\n");
+    const summary=`⚠️ Slip incomplete: ${matched.length}/${doc.selections.length} legs matched. No booking code was requested, so no legs were silently omitted.`;
+    return sendText(chatId,`${summary}${skippedNotice}\n\n${details||"A selection count mismatch prevented booking."}`,MAIN_MENU);
   }
   const s=getBookingSession(chatId); s.selections=matched; s.fixtures=[];
   const totalOdds=matched.reduce((n,x)=>n*x.odds,1);
